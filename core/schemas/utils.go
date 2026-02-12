@@ -3,12 +3,13 @@ package schemas
 import (
 	"encoding/json"
 	"fmt"
+	"math/rand"
 	"net/url"
 	"regexp"
 	"strconv"
 	"strings"
-
-	"github.com/bytedance/sonic"
+	"sync"
+	"time"
 )
 
 // Ptr creates a pointer to any value.
@@ -17,21 +18,79 @@ func Ptr[T any](v T) *T {
 	return &v
 }
 
+// GetRandomString generates a random alphanumeric string of the given length.
+func GetRandomString(length int) string {
+	if length <= 0 {
+		return ""
+	}
+	randomSource := rand.New(rand.NewSource(time.Now().UnixNano()))
+	letters := []rune("abcdef0123456789")
+	b := make([]rune, length)
+	for i := range b {
+		b[i] = letters[randomSource.Intn(len(letters))]
+	}
+	return string(b)
+}
+
+// knownProvidersMu protects concurrent access to knownProviders.
+var knownProvidersMu sync.RWMutex
+
+// knownProviders is a set of all known provider strings for O(1) lookup.
+// Built once from StandardProviders at package init time, and dynamically
+// updated when custom providers are added or removed.
+// Used by ParseModelString to distinguish real provider prefixes (e.g. "openai/gpt-4o")
+// from model namespace prefixes (e.g. "meta-llama/Llama-3.1-8B").
+var knownProviders = func() map[string]bool {
+	m := make(map[string]bool, len(StandardProviders))
+	for _, p := range StandardProviders {
+		m[string(p)] = true
+	}
+	return m
+}()
+
+// RegisterKnownProvider adds a provider to the known providers set.
+// This allows ParseModelString to correctly parse model strings with
+// custom provider prefixes (e.g., "my-custom-provider/gpt-4").
+func RegisterKnownProvider(provider ModelProvider) {
+	knownProvidersMu.Lock()
+	defer knownProvidersMu.Unlock()
+	knownProviders[string(provider)] = true
+}
+
+// UnregisterKnownProvider removes a custom provider from the known providers set.
+// Standard providers cannot be unregistered.
+func UnregisterKnownProvider(provider ModelProvider) {
+	for _, p := range StandardProviders {
+		if p == provider {
+			return // Don't unregister standard providers
+		}
+	}
+	knownProvidersMu.Lock()
+	defer knownProvidersMu.Unlock()
+	delete(knownProviders, string(provider))
+}
+
+// IsKnownProvider checks if a provider string is known.
+func IsKnownProvider(provider string) bool {
+	knownProvidersMu.RLock()
+	defer knownProvidersMu.RUnlock()
+	return knownProviders[provider]
+}
+
 // ParseModelString extracts provider and model from a model string.
 // For model strings like "anthropic/claude", it returns ("anthropic", "claude").
 // For model strings like "claude", it returns ("", "claude").
+// Only splits on "/" when the prefix is a known Bifrost provider, so model
+// namespaces like "meta-llama/Llama-3.1-8B" are preserved as-is.
 func ParseModelString(model string, defaultProvider ModelProvider) (ModelProvider, string) {
 	// Check if model contains a provider prefix (only split on first "/" to preserve model names with "/")
 	if strings.Contains(model, "/") {
 		parts := strings.SplitN(model, "/", 2)
-		if len(parts) == 2 {
-			extractedProvider := parts[0]
-			extractedModel := parts[1]
-
-			return ModelProvider(extractedProvider), extractedModel
+		if len(parts) == 2 && IsKnownProvider(parts[0]) {
+			return ModelProvider(parts[0]), parts[1]
 		}
 	}
-	// No provider prefix found, return empty provider and the original model
+	// No known provider prefix found, return default provider and the original model
 	return defaultProvider, model
 }
 
@@ -267,7 +326,7 @@ func JsonifyInput(input interface{}) string {
 	if input == nil {
 		return "{}"
 	}
-	jsonString, err := sonic.MarshalString(input)
+	jsonString, err := MarshalString(input)
 	if err != nil {
 		return "{}"
 	}
@@ -524,29 +583,58 @@ func SafeExtractFromMap(m map[string]interface{}, key string) (interface{}, bool
 	return value, exists
 }
 
-func SafeExtractOrderedMap(value interface{}) (OrderedMap, bool) {
+// SafeExtractStringMap safely extracts a map[string]string from an interface{} with type checking.
+// Handles both direct map[string]string and JSON-deserialized map[string]interface{} cases.
+func SafeExtractStringMap(value interface{}) (map[string]string, bool) {
 	if value == nil {
-		return OrderedMap{}, false
+		return nil, false
+	}
+	switch v := value.(type) {
+	case map[string]string:
+		return v, true
+	case map[string]interface{}:
+		result := make(map[string]string, len(v))
+		for key, val := range v {
+			if str, ok := SafeExtractString(val); ok {
+				result[key] = str
+			} else {
+				return nil, false
+			}
+		}
+		return result, true
+	default:
+		return nil, false
+	}
+}
+
+func SafeExtractOrderedMap(value interface{}) (*OrderedMap, bool) {
+	if value == nil {
+		return nil, false
 	}
 	switch v := value.(type) {
 	case map[string]interface{}:
-		orderedMap := OrderedMap(v)
-		return orderedMap, true
+		mapped := OrderedMapFromMap(v)
+		if mapped != nil {
+			return mapped, true
+		}
+		return nil, false
 	case *map[string]interface{}:
 		if v != nil {
-			orderedMap := OrderedMap(*v)
-			return orderedMap, true
+			mapped := OrderedMapFromMap(*v)
+			if mapped != nil {
+				return mapped, true
+			}
 		}
-		return OrderedMap{}, false
-	case OrderedMap:
-		return v, true
+		return nil, false
 	case *OrderedMap:
 		if v != nil {
-			return *v, true
+			return v, true
 		}
-		return OrderedMap{}, false
+		return nil, false
+	case OrderedMap:
+		return &v, true
 	}
-	return OrderedMap{}, false
+	return nil, false
 }
 
 // GET DEEP COPY UNTIL
@@ -617,23 +705,23 @@ func DeepCopyChatMessage(original ChatMessage) ChatMessage {
 			for i, annotation := range original.ChatAssistantMessage.Annotations {
 				copyAnnotation := ChatAssistantMessageAnnotation{
 					Type: annotation.Type,
-					Citation: ChatAssistantMessageAnnotationCitation{
-						StartIndex: annotation.Citation.StartIndex,
-						EndIndex:   annotation.Citation.EndIndex,
-						Title:      annotation.Citation.Title,
+					URLCitation: ChatAssistantMessageAnnotationCitation{
+						StartIndex: annotation.URLCitation.StartIndex,
+						EndIndex:   annotation.URLCitation.EndIndex,
+						Title:      annotation.URLCitation.Title,
 					},
 				}
-				if annotation.Citation.URL != nil {
-					copyURL := *annotation.Citation.URL
-					copyAnnotation.Citation.URL = &copyURL
+				if annotation.URLCitation.URL != nil {
+					copyURL := *annotation.URLCitation.URL
+					copyAnnotation.URLCitation.URL = &copyURL
 				}
-				if annotation.Citation.Sources != nil {
-					copySources := *annotation.Citation.Sources
-					copyAnnotation.Citation.Sources = &copySources
+				if annotation.URLCitation.Sources != nil {
+					copySources := *annotation.URLCitation.Sources
+					copyAnnotation.URLCitation.Sources = &copySources
 				}
-				if annotation.Citation.Type != nil {
-					copyType := *annotation.Citation.Type
-					copyAnnotation.Citation.Type = &copyType
+				if annotation.URLCitation.Type != nil {
+					copyType := *annotation.URLCitation.Type
+					copyAnnotation.URLCitation.Type = &copyType
 				}
 				copy.ChatAssistantMessage.Annotations[i] = copyAnnotation
 			}
@@ -725,6 +813,106 @@ func deepCopyChatContentBlock(original ChatContentBlock) ChatContentBlock {
 	}
 
 	return copy
+}
+
+// DeepCopyChatTool creates a deep copy of a ChatTool
+// to prevent shared data mutation between different plugin accumulators
+func DeepCopyChatTool(original ChatTool) ChatTool {
+	copyTool := ChatTool{
+		Type: original.Type,
+	}
+
+	// Deep copy Function if present
+	if original.Function != nil {
+		copyTool.Function = &ChatToolFunction{
+			Name: original.Function.Name,
+		}
+
+		if original.Function.Description != nil {
+			copyDescription := *original.Function.Description
+			copyTool.Function.Description = &copyDescription
+		}
+
+		if original.Function.Parameters != nil {
+			copyParams := &ToolFunctionParameters{
+				Type: original.Function.Parameters.Type,
+			}
+
+			if original.Function.Parameters.Description != nil {
+				copyParamDesc := *original.Function.Parameters.Description
+				copyParams.Description = &copyParamDesc
+			}
+
+			if original.Function.Parameters.Required != nil {
+				copyParams.Required = make([]string, len(original.Function.Parameters.Required))
+				copy(copyParams.Required, original.Function.Parameters.Required)
+			}
+
+			if original.Function.Parameters.Properties != nil {
+				// Deep copy preserving insertion order
+				copyProps := NewOrderedMapWithCapacity(original.Function.Parameters.Properties.Len())
+				original.Function.Parameters.Properties.Range(func(k string, v interface{}) bool {
+					copyProps.Set(k, DeepCopy(v))
+					return true
+				})
+				copyParams.Properties = copyProps
+			}
+
+			if original.Function.Parameters.Enum != nil {
+				copyParams.Enum = make([]string, len(original.Function.Parameters.Enum))
+				copy(copyParams.Enum, original.Function.Parameters.Enum)
+			}
+
+			if original.Function.Parameters.AdditionalProperties != nil {
+				copyAdditionalProps := *original.Function.Parameters.AdditionalProperties
+				copyParams.AdditionalProperties = &copyAdditionalProps
+			}
+
+			copyTool.Function.Parameters = copyParams
+		}
+
+		if original.Function.Strict != nil {
+			copyStrict := *original.Function.Strict
+			copyTool.Function.Strict = &copyStrict
+		}
+	}
+
+	// Deep copy Custom if present
+	if original.Custom != nil {
+		copyTool.Custom = &ChatToolCustom{}
+
+		if original.Custom.Format != nil {
+			copyFormat := &ChatToolCustomFormat{
+				Type: original.Custom.Format.Type,
+			}
+
+			if original.Custom.Format.Grammar != nil {
+				copyGrammar := &ChatToolCustomGrammarFormat{
+					Definition: original.Custom.Format.Grammar.Definition,
+					Syntax:     original.Custom.Format.Grammar.Syntax,
+				}
+				copyFormat.Grammar = copyGrammar
+			}
+
+			copyTool.Custom.Format = copyFormat
+		}
+	}
+
+	// Deep copy CacheControl if present
+	if original.CacheControl != nil {
+		copyCacheControl := &CacheControl{
+			Type: original.CacheControl.Type,
+		}
+
+		if original.CacheControl.TTL != nil {
+			copyTTL := *original.CacheControl.TTL
+			copyCacheControl.TTL = &copyTTL
+		}
+
+		copyTool.CacheControl = copyCacheControl
+	}
+
+	return copyTool
 }
 
 // DeepCopyResponsesMessage creates a deep copy of a ResponsesMessage
@@ -1039,12 +1227,137 @@ func deepCopyResponsesMessageContentBlock(original ResponsesMessageContentBlock)
 	return copy
 }
 
-// IsAnthropicModel checks if the model is an Anthropic model in Vertex.
+// IsNovaModel checks if the model is a Nova model.
+func IsNovaModel(model string) bool {
+	return strings.Contains(model, "nova")
+}
+
+// IsAnthropicModel checks if the model is an Anthropic model.
 func IsAnthropicModel(model string) bool {
 	return strings.Contains(model, "anthropic.") || strings.Contains(model, "claude")
 }
 
-// IsMistralModel checks if the model is a Mistral or Codestral model in Vertex.
+// IsMistralModel checks if the model is a Mistral or Codestral model.
 func IsMistralModel(model string) bool {
 	return strings.Contains(model, "mistral") || strings.Contains(model, "codestral")
+}
+
+func IsGeminiModel(model string) bool {
+	return strings.Contains(model, "gemini")
+}
+
+// IsImagenModel checks if the model is an Imagen model.
+func IsImagenModel(model string) bool {
+	return strings.Contains(strings.ToLower(model), "imagen")
+}
+
+// List of grok reasoning models
+var grokReasoningModels = []string{
+	"grok-3",
+	"grok-3-mini",
+	"grok-4",
+	"grok-4-fast-reasoning",
+	"grok-4-1-fast-reasoning",
+	"grok-code-fast-1",
+}
+
+// IsGrokReasoningModel checks if the given model is a grok reasoning model
+func IsGrokReasoningModel(model string) bool {
+	// Check if the model matches any of the reasoning models
+	for _, reasoningModel := range grokReasoningModels {
+		if strings.Contains(model, reasoningModel) {
+			// Make sure it's not a non-reasoning variant. Safety check for variants
+			if strings.Contains(model, "non-reasoning") {
+				return false
+			}
+			return true
+		}
+	}
+	return false
+}
+
+// Precompiled regexes for different kinds of version suffixes.
+var (
+	// Anthropic-style date: 20250514
+	anthropicDateRe = regexp.MustCompile(`^\d{8}$`)
+
+	// OpenAI-style date: 2024-09-12
+	openAIDateRe = regexp.MustCompile(`^\d{4}-\d{2}-\d{2}$`)
+
+	// Generic tagged versions:
+	//   v1, v1.2, v1.2.3, rc1, alpha, beta, preview, canary, experimental, etc.
+	//
+	// NOTE: we intentionally require 'v' for numeric semver-ish versions so that
+	// things like "-4" or "-4.5" are NOT treated as version tags.
+	taggedVersionRe = regexp.MustCompile(
+		`^(?:v\d+(?:\.\d+){0,2}|rc\d+|alpha|beta|preview|canary|experimental)$`,
+	)
+)
+
+// SplitModelAndVersion splits a model id into (base, versionSuffix).
+// If no known version suffix is found, versionSuffix will be empty and
+// base will be the original id.
+//
+// Examples:
+//
+//	"claude-sonnet-4"                 -> ("claude-sonnet-4", "")
+//	"claude-sonnet-4-20250514"        -> ("claude-sonnet-4", "20250514")
+//	"gpt-4.1-2024-09-12"              -> ("gpt-4.1", "2024-09-12")
+//	"gpt-4.1-mini-2024-09-12"         -> ("gpt-4.1-mini", "2024-09-12")
+//	"some-model-v2"                   -> ("some-model", "v2")
+//	"text-embedding-3-large-beta"     -> ("text-embedding-3-large", "beta")
+//	"claude-sonnet-4.5"               -> ("claude-sonnet-4.5", "")
+func SplitModelAndVersion(id string) (base, version string) {
+	if id == "" {
+		return "", ""
+	}
+
+	parts := strings.Split(id, "-")
+	n := len(parts)
+	if n == 0 {
+		return "", ""
+	}
+
+	// 1. Try OpenAI-style date: last 3 parts, e.g. "2024-09-12".
+	if n >= 3 {
+		last3 := strings.Join(parts[n-3:], "-")
+		if openAIDateRe.MatchString(last3) {
+			base := strings.Join(parts[:n-3], "-")
+			return base, last3
+		}
+	}
+
+	// 2. Try Anthropic-style date (20250514) or tagged versions (v1, beta, etc.) in last part.
+	if n >= 2 {
+		last := parts[n-1]
+		if anthropicDateRe.MatchString(last) || taggedVersionRe.MatchString(last) {
+			base := strings.Join(parts[:n-1], "-")
+			return base, last
+		}
+	}
+
+	// 3. No recognized version suffix.
+	return id, ""
+}
+
+// BaseModelName returns the model id with any recognized version suffix stripped.
+//
+// This is your "model name without version".
+func BaseModelName(id string) string {
+	base, _ := SplitModelAndVersion(id)
+	return base
+}
+
+// SameBaseModel reports whether two model ids refer to the same base model,
+// ignoring any recognized version suffixes.
+//
+// This works even if both sides are versioned, or both unversioned.
+func SameBaseModel(a, b string) bool {
+	// Fast path: exact match.
+	if a == b {
+		return true
+	}
+
+	// Compare normalized base names.
+	return BaseModelName(a) == BaseModelName(b)
 }

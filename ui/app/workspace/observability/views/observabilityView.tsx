@@ -12,6 +12,7 @@ import DatadogView from "./plugins/datadogView";
 import MaximView from "./plugins/maximView";
 import NewrelicView from "./plugins/newRelicView";
 import OtelView from "./plugins/otelView";
+import PrometheusView from "./plugins/prometheusView";
 
 type SupportedPlatform = {
 	id: string;
@@ -37,7 +38,11 @@ const supportedPlatformsList = (resolvedTheme: string): SupportedPlatform[] => [
 				/>
 			</svg>
 		),
-		tag: "Beta",
+	},
+	{
+		id: "prometheus",
+		name: "Prometheus",
+		icon: <Image alt="Prometheus" src="/images/prometheus-logo.svg" width={21} height={21} className="-ml-0.5" />,
 	},
 	{
 		id: "maxim",
@@ -47,8 +52,7 @@ const supportedPlatformsList = (resolvedTheme: string): SupportedPlatform[] => [
 	{
 		id: "datadog",
 		name: "Datadog",
-		icon: <Image alt="Datadog" src="/images/datadog-logo.png" width={32} height={32} />,
-		disabled: true,
+		icon: <Image alt="Datadog" src="/images/datadog-logo.png" width={32} height={32} className="-ml-0.5" />,
 	},
 	{
 		id: "newrelic",
@@ -74,12 +78,16 @@ export default function ObservabilityView() {
 
 	const supportedPlatforms = useMemo(() => supportedPlatformsList(resolvedTheme || "light"), [resolvedTheme]);
 
+	// Map UI tab IDs to actual plugin names (prometheus tab uses telemetry plugin)
+	const getPluginNameForTab = (tabId: string) => (tabId === "prometheus" ? "telemetry" : tabId);
+
 	useEffect(() => {
 		if (!plugins || plugins.length === 0) return;
 		if (!selectedPluginId) {
-			setSelectedPluginId(plugins.find((plugin) => plugin.name === supportedPlatforms[0].id)?.name ?? supportedPlatforms[0].id);
+			setSelectedPluginId(supportedPlatforms[0].id);
 		} else {
-			const plugin = plugins.find((plugin) => plugin.name === selectedPluginId) ?? {
+			const pluginName = getPluginNameForTab(selectedPluginId);
+			const plugin = plugins.find((plugin) => plugin.name === pluginName) ?? {
 				name: selectedPluginId,
 				enabled: false,
 				config: {},
@@ -93,7 +101,8 @@ export default function ObservabilityView() {
 
 	useEffect(() => {
 		if (selectedPluginId) {
-			const plugin = plugins?.find((plugin) => plugin.name === selectedPluginId) ?? {
+			const pluginName = getPluginNameForTab(selectedPluginId);
+			const plugin = plugins?.find((plugin) => plugin.name === pluginName) ?? {
 				name: selectedPluginId,
 				enabled: false,
 				config: {},
@@ -123,11 +132,11 @@ export default function ObservabilityView() {
 									key={tab.id}
 									disabled={!!tab.disabled}
 									aria-disabled={tab.disabled ? true : undefined}
-									aria-current={selectedPlugin?.name === tab.id ? "page" : undefined}
+									aria-current={selectedPluginId === tab.id ? "page" : undefined}
 									className={cn(
-										"mb-1 flex w-full items-center gap-2 rounded-sm border px-3 py-1.5 text-sm max-h-[32px]",
+										"mb-1 flex max-h-[32px] w-full items-center gap-2 rounded-sm border px-3 py-1.5 text-sm",
 										tab.disabled ? "opacity-50" : "",
-										selectedPlugin?.name === tab.id
+										selectedPluginId === tab.id
 											? "bg-secondary opacity-100 hover:opacity-100"
 											: tab.disabled
 												? "border-none"
@@ -158,10 +167,11 @@ export default function ObservabilityView() {
 				</div>
 			</div>
 			<div className="w-full pt-4">
-				{selectedPlugin?.name === "otel" && <OtelView />}
-				{selectedPlugin?.name === "maxim" && <MaximView />}
-				{selectedPlugin?.name === "datadog" && <DatadogView />}
-				{selectedPlugin?.name === "newrelic" && <NewrelicView />}
+				{selectedPluginId === "prometheus" && <PrometheusView />}
+				{selectedPluginId === "otel" && <OtelView />}
+				{selectedPluginId === "maxim" && <MaximView />}
+				{selectedPluginId === "datadog" && <DatadogView />}
+				{selectedPluginId === "newrelic" && <NewrelicView />}
 			</div>
 		</div>
 	);

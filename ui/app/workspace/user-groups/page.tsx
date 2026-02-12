@@ -1,13 +1,7 @@
 "use client";
 
 import FullPageLoader from "@/components/fullPageLoader";
-import {
-    getErrorMessage,
-    useLazyGetCoreConfigQuery,
-    useLazyGetCustomersQuery,
-    useLazyGetTeamsQuery,
-    useLazyGetVirtualKeysQuery,
-} from "@/lib/store";
+import { getErrorMessage, useGetCustomersQuery, useGetTeamsQuery, useGetVirtualKeysQuery, useLazyGetCoreConfigQuery } from "@/lib/store";
 import { cn } from "@/lib/utils";
 import UsersView from "@enterprise/components/user-groups/usersView";
 import { Building, Users, WalletCards } from "lucide-react";
@@ -16,6 +10,8 @@ import { useEffect, useState } from "react";
 import { toast } from "sonner";
 import CustomersTable from "./views/customerTable";
 import TeamsTable from "./views/teamsTable";
+
+const POLLING_INTERVAL = 5000;
 
 const tabs = [
 	{
@@ -39,30 +35,58 @@ export default function TeamsCustomersPage() {
 	const [activeTab, setActiveTab] = useQueryState("tab");
 
 	const [governanceEnabled, setGovernanceEnabled] = useState<boolean | null>(null);
-
-	// Lazy query hooks
-	const [triggerGetVirtualKeys, { data: virtualKeysData, error: vkError, isLoading: vkLoading }] = useLazyGetVirtualKeysQuery();
-	const [triggerGetTeams, { data: teamsData, error: teamsError, isLoading: teamsLoading }] = useLazyGetTeamsQuery();
-	const [triggerGetCustomers, { data: customersData, error: customersError, isLoading: customersLoading }] = useLazyGetCustomersQuery();
 	const [triggerGetConfig] = useLazyGetCoreConfigQuery();
 
-	const isLoading = vkLoading || teamsLoading || customersLoading || governanceEnabled === null;
+	// Use regular queries with skip option and polling
+	const {
+		data: virtualKeysData,
+		error: vkError,
+		isLoading: vkLoading,
+	} = useGetVirtualKeysQuery(undefined, {
+		skip: !governanceEnabled,
+		pollingInterval: POLLING_INTERVAL,
+	});
 
-	// Check governance and trigger queries conditionally
+	const {
+		data: teamsData,
+		error: teamsError,
+		isLoading: teamsLoading,
+	} = useGetTeamsQuery(
+		{},
+		{
+			skip: !governanceEnabled,
+			pollingInterval: POLLING_INTERVAL,
+		},
+	);
+
+	const {
+		data: customersData,
+		error: customersError,
+		isLoading: customersLoading,
+	} = useGetCustomersQuery(undefined, {
+		skip: !governanceEnabled,
+		pollingInterval: POLLING_INTERVAL,
+	});
+
+	const isLoading = governanceEnabled === null || (governanceEnabled && (vkLoading || teamsLoading || customersLoading));
+
+	// Check governance
 	useEffect(() => {
-		triggerGetConfig({ fromDB: true }).then((res) => {
-			if (res.data && res.data.client_config.enable_governance) {
-				setGovernanceEnabled(true);
-				// Trigger lazy queries only when governance is enabled
-				triggerGetVirtualKeys();
-				triggerGetTeams({});
-				triggerGetCustomers();
-			} else {
+		triggerGetConfig({ fromDB: true })
+			.then((res) => {
+				if (res.data?.client_config?.enable_governance) {
+					setGovernanceEnabled(true);
+				} else {
+					setGovernanceEnabled(false);
+					toast.error("Governance is not enabled. Please enable it in the config.");
+				}
+			})
+			.catch((err) => {
+				console.error("Failed to fetch config:", err);
 				setGovernanceEnabled(false);
-				toast.error("Governance is not enabled. Please enable it in the config.");
-			}
-		});
-	}, [triggerGetConfig, triggerGetVirtualKeys, triggerGetTeams, triggerGetCustomers]);
+				toast.error(getErrorMessage(err) || "Failed to load configuration");
+			});
+	}, [triggerGetConfig]);
 
 	// Handle query errors - show consolidated error if all APIs fail
 	useEffect(() => {
@@ -89,24 +113,17 @@ export default function TeamsCustomersPage() {
 		}
 	}, [activeTab, setActiveTab]);
 
-	const handleRefresh = () => {
-		if (governanceEnabled) {
-			triggerGetVirtualKeys();
-			triggerGetTeams({});
-			triggerGetCustomers();
-		}
-	};
-
 	if (isLoading) {
 		return <FullPageLoader />;
 	}
 
 	return (
-		<div className="flex w-full flex-row gap-4 max-w-7xl mx-auto">
+		<div className="mx-auto flex w-full max-w-7xl flex-row gap-4">
 			<div className="flex min-w-[200px] flex-col gap-1 rounded-md bg-zinc-50/50 p-4 dark:bg-zinc-800/20">
 				{tabs.map((tab) => (
 					<button
 						key={tab.id}
+						data-testid={`${tab.id}-tab`}
 						className={cn(
 							"mb-1 flex w-full items-center gap-2 rounded-sm border px-3 py-1.5 text-sm",
 							activeTab === tab.id
@@ -128,7 +145,6 @@ export default function TeamsCustomersPage() {
 						teams={teamsData?.teams || []}
 						customers={customersData?.customers || []}
 						virtualKeys={virtualKeysData?.virtual_keys || []}
-						onRefresh={handleRefresh}
 					/>
 				)}
 				{activeTab === "customers" && (
@@ -136,7 +152,6 @@ export default function TeamsCustomersPage() {
 						customers={customersData?.customers || []}
 						teams={teamsData?.teams || []}
 						virtualKeys={virtualKeysData?.virtual_keys || []}
-						onRefresh={handleRefresh}
 					/>
 				)}
 			</div>

@@ -1,14 +1,16 @@
 import { Button } from "@/components/ui/button";
+import { Checkbox } from "@/components/ui/checkbox";
 import { Command, CommandEmpty, CommandGroup, CommandInput, CommandItem, CommandList } from "@/components/ui/command";
 import { DateTimePickerWithRange } from "@/components/ui/datePickerWithRange";
 import { Input } from "@/components/ui/input";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
-import { RequestTypeLabels, RequestTypes, Statuses } from "@/lib/constants/logs";
-import { useGetAvailableFilterDataQuery, useGetProvidersQuery } from "@/lib/store";
+import { RequestTypeLabels, RequestTypes, RoutingEngineUsedLabels, Statuses } from "@/lib/constants/logs";
+import { getErrorMessage, useGetAvailableFilterDataQuery, useGetProvidersQuery, useRecalculateLogCostsMutation } from "@/lib/store";
 import type { LogFilters as LogFiltersType } from "@/lib/types/logs";
 import { cn } from "@/lib/utils";
-import { Check, FilterIcon, Pause, Play, Search } from "lucide-react";
+import { Calculator, Check, FilterIcon, MoreVertical, Pause, Play, Search } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
+import { toast } from "sonner";
 
 /**
  * Converts a Date object to an RFC 3339 string with the local time zone offset.
@@ -44,17 +46,66 @@ export function dateToRfc3339Local(dateObj?: Date): string {
 	return rfc3339Local;
 }
 
+/** Predefined time periods for the logs date range picker (matches E2E test labels) */
+const LOG_TIME_PERIODS = [
+	{ label: "Last hour", value: "1h" },
+	{ label: "Last 6 hours", value: "6h" },
+	{ label: "Last 24 hours", value: "24h" },
+	{ label: "Last 7 days", value: "7d" },
+	{ label: "Last 30 days", value: "30d" },
+];
+
+function getRangeForPeriod(period: string): { from: Date; to: Date } {
+	const to = new Date();
+	const from = new Date(to.getTime());
+	switch (period) {
+		case "1h":
+			from.setHours(from.getHours() - 1);
+			break;
+		case "6h":
+			from.setHours(from.getHours() - 6);
+			break;
+		case "24h":
+			from.setHours(from.getHours() - 24);
+			break;
+		case "7d":
+			from.setDate(from.getDate() - 7);
+			break;
+		case "30d":
+			from.setDate(from.getDate() - 30);
+			break;
+		default:
+			from.setHours(from.getHours() - 24);
+	}
+	return { from, to };
+}
+
 interface LogFiltersProps {
 	filters: LogFiltersType;
 	onFiltersChange: (filters: LogFiltersType) => void;
 	liveEnabled: boolean;
 	onLiveToggle: (enabled: boolean) => void;
+	fetchLogs: () => Promise<void>;
+	fetchStats: () => Promise<void>;
 }
 
-export function LogFilters({ filters, onFiltersChange, liveEnabled, onLiveToggle }: LogFiltersProps) {
-	const [open, setOpen] = useState(false);
+export function LogFilters({ filters, onFiltersChange, liveEnabled, onLiveToggle, fetchLogs, fetchStats }: LogFiltersProps) {
+	const [openFiltersPopover, setOpenFiltersPopover] = useState(false);
+	const [openMoreActionsPopover, setOpenMoreActionsPopover] = useState(false);
 	const [localSearch, setLocalSearch] = useState(filters.content_search || "");
 	const searchTimeoutRef = useRef<NodeJS.Timeout | undefined>(undefined);
+	const filtersRef = useRef<LogFiltersType>(filters);
+	const [recalculateCosts, { isLoading: recalculating }] = useRecalculateLogCostsMutation();
+
+	// Keep filtersRef in sync so debounced search always merges with latest filters (search within filtered results)
+	useEffect(() => {
+		filtersRef.current = filters;
+	}, [filters]);
+
+	// Sync localSearch when filters.content_search changes externally (e.g. URL restore)
+	useEffect(() => {
+		setLocalSearch(filters.content_search || "");
+	}, [filters.content_search]);
 
 	// Convert ISO strings from filters to Date objects for the DateTimePicker
 	const [startTime, setStartTime] = useState<Date | undefined>(filters.start_time ? new Date(filters.start_time) : undefined);
@@ -68,10 +119,13 @@ export function LogFilters({ filters, onFiltersChange, liveEnabled, onLiveToggle
 	const availableModels = filterData?.models || [];
 	const availableSelectedKeys = filterData?.selected_keys || [];
 	const availableVirtualKeys = filterData?.virtual_keys || [];
+	const availableRoutingRules = filterData?.routing_rules || [];
+	const availableRoutingEngines = filterData?.routing_engines || [];
 
 	// Create mappings from name to ID for keys and virtual keys
 	const selectedKeyNameToId = new Map(availableSelectedKeys.map((key) => [key.name, key.id]));
 	const virtualKeyNameToId = new Map(availableVirtualKeys.map((key) => [key.name, key.id]));
+	const routingRuleNameToId = new Map(availableRoutingRules.map((rule) => [rule.name, rule.id]));
 
 	// Sync local date state when filters change from URL
 	useEffect(() => {
@@ -88,6 +142,21 @@ export function LogFilters({ filters, onFiltersChange, liveEnabled, onLiveToggle
 		};
 	}, []);
 
+	const handleRecalculateCosts = useCallback(async () => {
+		try {
+			const response = await recalculateCosts({ filters }).unwrap();
+			await fetchLogs();
+			await fetchStats();
+			setOpenMoreActionsPopover(false);
+			toast.success(`Recalculated costs for ${response.updated} logs`, {
+				description: `${response.updated} logs updated, ${response.skipped} logs skipped, ${response.remaining} logs remaining`,
+				duration: 5000,
+			});
+		} catch (err) {
+			toast.error(getErrorMessage(err));
+		}
+	}, [filters, recalculateCosts, fetchLogs, fetchStats]);
+
 	const handleSearchChange = useCallback(
 		(value: string) => {
 			setLocalSearch(value);
@@ -97,12 +166,12 @@ export function LogFilters({ filters, onFiltersChange, liveEnabled, onLiveToggle
 				clearTimeout(searchTimeoutRef.current);
 			}
 
-			// Set new timeout
+			// Use filtersRef.current so search is applied on top of current filters (search within filtered results)
 			searchTimeoutRef.current = setTimeout(() => {
-				onFiltersChange({ ...filters, content_search: value });
+				onFiltersChange({ ...filtersRef.current, content_search: value });
 			}, 500); // 500ms debounce
 		},
-		[filters, onFiltersChange],
+		[onFiltersChange],
 	);
 
 	const handleFilterSelect = (category: keyof typeof FILTER_OPTIONS, value: string) => {
@@ -113,6 +182,8 @@ export function LogFilters({ filters, onFiltersChange, liveEnabled, onLiveToggle
 			Models: "models",
 			"Selected Keys": "selected_key_ids",
 			"Virtual Keys": "virtual_key_ids",
+			"Routing Rules": "routing_rule_ids",
+			"Routing Engines": "routing_engine_used",
 		};
 
 		const filterKey = filterKeyMap[category];
@@ -123,6 +194,8 @@ export function LogFilters({ filters, onFiltersChange, liveEnabled, onLiveToggle
 			valueToStore = selectedKeyNameToId.get(value) || value;
 		} else if (category === "Virtual Keys") {
 			valueToStore = virtualKeyNameToId.get(value) || value;
+		} else if (category === "Routing Rules") {
+			valueToStore = routingRuleNameToId.get(value) || value;
 		}
 
 		const currentValues = (filters[filterKey] as string[]) || [];
@@ -144,6 +217,8 @@ export function LogFilters({ filters, onFiltersChange, liveEnabled, onLiveToggle
 			Models: "models",
 			"Selected Keys": "selected_key_ids",
 			"Virtual Keys": "virtual_key_ids",
+			"Routing Rules": "routing_rule_ids",
+			"Routing Engines": "routing_engine_used",
 		};
 
 		const filterKey = filterKeyMap[category];
@@ -155,6 +230,8 @@ export function LogFilters({ filters, onFiltersChange, liveEnabled, onLiveToggle
 			valueToCheck = selectedKeyNameToId.get(value) || value;
 		} else if (category === "Virtual Keys") {
 			valueToCheck = virtualKeyNameToId.get(value) || value;
+		} else if (category === "Routing Rules") {
+			valueToCheck = routingRuleNameToId.get(value) || value;
 		}
 
 		return Array.isArray(currentValues) && currentValues.includes(valueToCheck);
@@ -182,11 +259,13 @@ export function LogFilters({ filters, onFiltersChange, liveEnabled, onLiveToggle
 		Models: filterDataLoading ? ["Loading models..."] : availableModels,
 		"Selected Keys": filterDataLoading ? ["Loading selected keys..."] : availableSelectedKeys.map((key) => key.name),
 		"Virtual Keys": filterDataLoading ? ["Loading virtual keys..."] : availableVirtualKeys.map((key) => key.name),
+		"Routing Engines": filterDataLoading ? ["Loading routing engines..."] : availableRoutingEngines,
+		"Routing Rules": filterDataLoading ? ["Loading routing rules..."] : availableRoutingRules.map((rule) => rule.name),
 	} as const;
 
 	return (
-		<div className="flex items-center justify-between space-x-4">
-			<Button variant={"outline"} size="sm" className="h-9" onClick={() => onLiveToggle(!liveEnabled)}>
+		<div className="flex items-center justify-between space-x-2">
+			<Button variant={"outline"} size="sm" className="h-7.5" onClick={() => onLiveToggle(!liveEnabled)}>
 				{liveEnabled ? (
 					<>
 						<Pause className="h-4 w-4" />
@@ -199,11 +278,11 @@ export function LogFilters({ filters, onFiltersChange, liveEnabled, onLiveToggle
 					</>
 				)}
 			</Button>
-			<div className="border-input flex flex-1 items-center gap-2 rounded-sm border">
+			<div className="border-input flex h-7.5 flex-1 items-center gap-2 rounded-sm border">
 				<Search className="mr-0.5 ml-2 size-4" />
 				<Input
 					type="text"
-					className="rounded-tl-none rounded-tr-sm rounded-br-sm rounded-bl-none border-none bg-slate-50 shadow-none outline-none focus-visible:ring-0"
+					className="!h-7 rounded-tl-none rounded-tr-sm rounded-br-sm rounded-bl-none border-none bg-slate-50 shadow-none outline-none focus-visible:ring-0"
 					placeholder="Search logs"
 					value={localSearch}
 					onChange={(e) => handleSearchChange(e.target.value)}
@@ -211,6 +290,7 @@ export function LogFilters({ filters, onFiltersChange, liveEnabled, onLiveToggle
 			</div>
 
 			<DateTimePickerWithRange
+				triggerTestId="filter-date-range"
 				dateTime={{
 					from: startTime,
 					to: endTime,
@@ -224,10 +304,22 @@ export function LogFilters({ filters, onFiltersChange, liveEnabled, onLiveToggle
 						end_time: p.to?.toISOString(),
 					});
 				}}
+				preDefinedPeriods={LOG_TIME_PERIODS}
+				onPredefinedPeriodChange={(periodValue) => {
+					if (!periodValue) return;
+					const { from, to } = getRangeForPeriod(periodValue);
+					setStartTime(from);
+					setEndTime(to);
+					onFiltersChange({
+						...filters,
+						start_time: from.toISOString(),
+						end_time: to.toISOString(),
+					});
+				}}
 			/>
-			<Popover open={open} onOpenChange={setOpen}>
+			<Popover open={openFiltersPopover} onOpenChange={setOpenFiltersPopover}>
 				<PopoverTrigger asChild>
-					<Button variant="outline" size="sm" className="h-9">
+					<Button variant="outline" size="sm" className="h-7.5 w-[120px]">
 						<FilterIcon className="h-4 w-4" />
 						Filters
 						{getSelectedCount() > 0 && (
@@ -242,17 +334,33 @@ export function LogFilters({ filters, onFiltersChange, liveEnabled, onLiveToggle
 						<CommandInput placeholder="Search filters..." />
 						<CommandList>
 							<CommandEmpty>No filters found.</CommandEmpty>
+							<CommandGroup>
+								<CommandItem className="cursor-pointer">
+									<Checkbox
+										className={cn(
+											"border-primary opacity-50",
+											filters.missing_cost_only && "bg-primary text-primary-foreground opacity-100",
+										)}
+										id="missing-cost-toggle"
+										checked={!!filters.missing_cost_only}
+										onCheckedChange={(checked: boolean) => onFiltersChange({ ...filters, missing_cost_only: checked })}
+									/>
+									<span className="text-sm">Show missing cost</span>
+								</CommandItem>
+							</CommandGroup>
 							{Object.entries(FILTER_OPTIONS)
 								.filter(([_, values]) => values.length > 0)
 								.map(([category, values]) => (
 									<CommandGroup key={category} heading={category}>
-										{values.map((value) => {
+										{values.map((value: string) => {
 											const selected = isSelected(category as keyof typeof FILTER_OPTIONS, value);
 											const isLoading =
 												(category === "Providers" && providersLoading) ||
 												(category === "Models" && filterDataLoading) ||
 												(category === "Selected Keys" && filterDataLoading) ||
-												(category === "Virtual Keys" && filterDataLoading);
+												(category === "Virtual Keys" && filterDataLoading) ||
+												(category === "Routing Rules" && filterDataLoading) ||
+												(category === "Routing Engines" && filterDataLoading);
 											return (
 												<CommandItem
 													key={value}
@@ -272,13 +380,34 @@ export function LogFilters({ filters, onFiltersChange, liveEnabled, onLiveToggle
 														)}
 													</div>
 													<span className={cn("lowercase", isLoading && "text-muted-foreground")}>
-														{category === "Type" ? RequestTypeLabels[value as keyof typeof RequestTypeLabels] : value}
+														{category === "Type" ? RequestTypeLabels[value as keyof typeof RequestTypeLabels] :
+															category === "Routing Engines" ? (RoutingEngineUsedLabels[value as keyof typeof RoutingEngineUsedLabels] ?? value) : value}
 													</span>
 												</CommandItem>
 											);
 										})}
 									</CommandGroup>
 								))}
+						</CommandList>
+					</Command>
+				</PopoverContent>
+			</Popover>
+			<Popover open={openMoreActionsPopover} onOpenChange={setOpenMoreActionsPopover}>
+				<PopoverTrigger asChild>
+					<Button variant="outline" size="sm" className="h-7.5">
+						<MoreVertical className="h-4 w-4" />
+					</Button>
+				</PopoverTrigger>
+				<PopoverContent className="bg-accent w-[250px] p-2" align="end">
+					<Command>
+						<CommandList>
+							<CommandItem className="hover:bg-accent/50 cursor-pointer" onSelect={handleRecalculateCosts}>
+								<Calculator className="text-muted-foreground size-4" />
+								<div className="flex flex-col">
+									<span className="text-sm">Recalculate costs</span>
+									<span className="text-muted-foreground text-xs">For all logs that don't have a cost</span>
+								</div>
+							</CommandItem>
 						</CommandList>
 					</Command>
 				</PopoverContent>

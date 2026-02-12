@@ -1,9 +1,11 @@
 package tables
 
 import (
+	"encoding/json"
 	"fmt"
 	"time"
 
+	"github.com/maximhq/bifrost/core/schemas"
 	"gorm.io/gorm"
 )
 
@@ -24,7 +26,7 @@ type TableVirtualKeyProviderConfig struct {
 	ID            uint     `gorm:"primaryKey;autoIncrement" json:"id"`
 	VirtualKeyID  string   `gorm:"type:varchar(255);not null" json:"virtual_key_id"`
 	Provider      string   `gorm:"type:varchar(50);not null" json:"provider"`
-	Weight        float64  `gorm:"default:1.0" json:"weight"`
+	Weight        *float64 `json:"weight"`
 	AllowedModels []string `gorm:"type:text;serializer:json" json:"allowed_models"` // Empty means all models allowed
 	BudgetID      *string  `gorm:"type:varchar(255);index" json:"budget_id,omitempty"`
 	RateLimitID   *string  `gorm:"type:varchar(255);index" json:"rate_limit_id,omitempty"`
@@ -40,6 +42,54 @@ func (TableVirtualKeyProviderConfig) TableName() string {
 	return "governance_virtual_key_provider_configs"
 }
 
+// UnmarshalJSON custom unmarshaller to handle both "keys" ([]TableKey) and "allowed_keys" ([]string) formats
+func (pc *TableVirtualKeyProviderConfig) UnmarshalJSON(data []byte) error {
+	// Temporary struct to capture all fields including allowed_keys
+	type Alias TableVirtualKeyProviderConfig
+	type TempProviderConfig struct {
+		Alias
+		AllowedKeys []string `json:"allowed_keys"` // Config file format: array of key names
+	}
+
+	var temp TempProviderConfig
+	if err := json.Unmarshal(data, &temp); err != nil {
+		return err
+	}
+
+	// Copy all standard fields
+	*pc = TableVirtualKeyProviderConfig(temp.Alias)
+
+	// If allowed_keys is provided (config file format), convert to Keys
+	// This takes precedence if Keys is empty but allowed_keys has values
+	if len(temp.AllowedKeys) > 0 && len(pc.Keys) == 0 {
+		pc.Keys = make([]TableKey, len(temp.AllowedKeys))
+		for i, keyName := range temp.AllowedKeys {
+			pc.Keys[i] = TableKey{Name: keyName}
+		}
+	}
+
+	return nil
+}
+
+// MarshalJSON custom marshaller to ensure AllowedModels is always an array (never null)
+func (pc TableVirtualKeyProviderConfig) MarshalJSON() ([]byte, error) {
+	type Alias TableVirtualKeyProviderConfig
+
+	// Ensure AllowedModels is an empty slice instead of nil
+	allowedModels := pc.AllowedModels
+	if allowedModels == nil {
+		allowedModels = []string{}
+	}
+
+	return json.Marshal(&struct {
+		Alias
+		AllowedModels []string `json:"allowed_models"`
+	}{
+		Alias:         Alias(pc),
+		AllowedModels: allowedModels,
+	})
+}
+
 // AfterFind hook for TableVirtualKeyProviderConfig to clear sensitive data from associated keys
 func (pc *TableVirtualKeyProviderConfig) AfterFind(tx *gorm.DB) error {
 	if pc.Keys != nil {
@@ -48,11 +98,15 @@ func (pc *TableVirtualKeyProviderConfig) AfterFind(tx *gorm.DB) error {
 			key := &pc.Keys[i]
 
 			// Clear the actual API key value
-			key.Value = ""
+			key.Value = *schemas.NewEnvVar("")
 
 			// Clear all Azure-related sensitive fields
 			key.AzureEndpoint = nil
 			key.AzureAPIVersion = nil
+			key.AzureClientID = nil
+			key.AzureClientSecret = nil
+			key.AzureTenantID = nil
+			key.AzureScopesJSON = nil
 			key.AzureDeploymentsJSON = nil
 			key.AzureKeyConfig = nil
 
@@ -72,6 +126,10 @@ func (pc *TableVirtualKeyProviderConfig) AfterFind(tx *gorm.DB) error {
 			key.BedrockDeploymentsJSON = nil
 			key.BedrockKeyConfig = nil
 
+			// Clear all Replicate-related sensitive fields
+			key.ReplicateDeploymentsJSON = nil
+			key.ReplicateKeyConfig = nil
+
 			pc.Keys[i] = *key
 		}
 	}
@@ -84,11 +142,42 @@ type TableVirtualKeyMCPConfig struct {
 	MCPClientID    uint           `gorm:"not null;uniqueIndex:idx_vk_mcpclient" json:"mcp_client_id"`
 	MCPClient      TableMCPClient `gorm:"foreignKey:MCPClientID" json:"mcp_client"`
 	ToolsToExecute []string       `gorm:"type:text;serializer:json" json:"tools_to_execute"`
+
+	// MCPClientName is used during config file parsing to resolve the MCP client by name.
+	// This field is not persisted to the database - it's only used to capture
+	// "mcp_client_name" from config.json and then resolve it to MCPClientID.
+	MCPClientName string `gorm:"-" json:"-"`
 }
 
 // TableName sets the table name for each model
 func (TableVirtualKeyMCPConfig) TableName() string {
 	return "governance_virtual_key_mcp_configs"
+}
+
+// UnmarshalJSON custom unmarshaller to handle both "mcp_client_id" (database format)
+// and "mcp_client_name" (config file format) for MCP client references.
+func (mc *TableVirtualKeyMCPConfig) UnmarshalJSON(data []byte) error {
+	// Temporary struct to capture all fields including mcp_client_name
+	type Alias TableVirtualKeyMCPConfig
+	type TempMCPConfig struct {
+		Alias
+		MCPClientName string `json:"mcp_client_name"` // Config file format: MCP client name
+	}
+
+	var temp TempMCPConfig
+	if err := json.Unmarshal(data, &temp); err != nil {
+		return err
+	}
+
+	// Copy all standard fields
+	*mc = TableVirtualKeyMCPConfig(temp.Alias)
+
+	// Capture mcp_client_name for later resolution to MCPClientID
+	if temp.MCPClientName != "" {
+		mc.MCPClientName = temp.MCPClientName
+	}
+
+	return nil
 }
 
 // TableVirtualKey represents a virtual key with budget, rate limits, and team/customer association
@@ -112,6 +201,10 @@ type TableVirtualKey struct {
 	Customer  *TableCustomer  `gorm:"foreignKey:CustomerID" json:"customer,omitempty"`
 	Budget    *TableBudget    `gorm:"foreignKey:BudgetID;onDelete:CASCADE" json:"budget,omitempty"`
 	RateLimit *TableRateLimit `gorm:"foreignKey:RateLimitID;onDelete:CASCADE" json:"rate_limit,omitempty"`
+
+	// Config hash is used to detect the changes synced from config.json file
+	// Every time we sync the config.json file, we will update the config hash
+	ConfigHash string `gorm:"type:varchar(255);null" json:"config_hash"`
 
 	CreatedAt time.Time `gorm:"index;not null" json:"created_at"`
 	UpdatedAt time.Time `gorm:"index;not null" json:"updated_at"`

@@ -17,9 +17,14 @@ export default function AddNewKeySheet({ show, onCancel, provider, keyIndex }: P
 	const successMessage = isEditing ? "Key updated successfully" : "Key added successfully";
 
 	return (
-		<Sheet open={show} onOpenChange={(open) => { if (!open) onCancel(); }}>
-			<SheetContent className="custom-scrollbar bg-white dark:bg-card p-4">
-				<SheetHeader>
+		<Sheet
+			open={show}
+			onOpenChange={(open) => {
+				if (!open) onCancel();
+			}}
+		>
+			<SheetContent className="custom-scrollbar dark:bg-card bg-white p-8" data-testid="key-form">
+				<SheetHeader className="flex flex-col items-start">
 					<SheetTitle>
 						<div className="font-lg flex items-center gap-2">
 							<div className={"flex items-center"}>
@@ -29,7 +34,7 @@ export default function AddNewKeySheet({ show, onCancel, provider, keyIndex }: P
 						</div>
 					</SheetTitle>
 				</SheetHeader>
-				<div className="px-4">
+				<div>
 					<ProviderKeyForm
 						provider={provider}
 						keyIndex={keyIndex}

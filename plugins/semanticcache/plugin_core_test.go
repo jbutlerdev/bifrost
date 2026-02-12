@@ -2,7 +2,6 @@ package semanticcache
 
 import (
 	"context"
-	"os"
 	"testing"
 	"time"
 
@@ -137,7 +136,7 @@ func TestSemanticSearch(t *testing.T) {
 	t.Logf("First request completed in %v", duration1)
 	t.Logf("Response: %s", *response1.Choices[0].Message.Content.ContentStr)
 
-	// Wait for cache to be written (async PostHook needs time to complete)
+	// Wait for cache to be written (async PostLLMHook needs time to complete)
 	WaitForCache()
 
 	// Second request - very similar text to test semantic matching
@@ -348,9 +347,10 @@ func TestCacheConfiguration(t *testing.T) {
 			config: &Config{
 				Provider:       schemas.OpenAI,
 				EmbeddingModel: "text-embedding-3-small",
+				Dimension:      1536,
 				Threshold:      0.95, // Very high threshold
 				Keys: []schemas.Key{
-					{Value: os.Getenv("OPENAI_API_KEY"), Models: []string{}, Weight: 1.0},
+					{Value: *schemas.NewEnvVar("env.OPENAI_API_KEY"), Models: []string{}, Weight: 1.0},
 				},
 			},
 			expectedBehavior: "strict_matching",
@@ -360,9 +360,10 @@ func TestCacheConfiguration(t *testing.T) {
 			config: &Config{
 				Provider:       schemas.OpenAI,
 				EmbeddingModel: "text-embedding-3-small",
+				Dimension:      1536,
 				Threshold:      0.1, // Very low threshold
 				Keys: []schemas.Key{
-					{Value: os.Getenv("OPENAI_API_KEY"), Models: []string{}, Weight: 1.0},
+					{Value: *schemas.NewEnvVar("env.OPENAI_API_KEY"), Models: []string{}, Weight: 1.0},
 				},
 			},
 			expectedBehavior: "loose_matching",
@@ -372,10 +373,11 @@ func TestCacheConfiguration(t *testing.T) {
 			config: &Config{
 				Provider:       schemas.OpenAI,
 				EmbeddingModel: "text-embedding-3-small",
+				Dimension:      1536,
 				Threshold:      0.8,
 				TTL:            1 * time.Hour, // Custom TTL
 				Keys: []schemas.Key{
-					{Value: os.Getenv("OPENAI_API_KEY"), Models: []string{}, Weight: 1.0},
+					{Value: *schemas.NewEnvVar("env.OPENAI_API_KEY"), Models: []string{}, Weight: 1.0},
 				},
 			},
 			expectedBehavior: "custom_ttl",

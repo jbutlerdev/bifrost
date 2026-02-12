@@ -1,15 +1,35 @@
 "use client";
 
+import {
+	AlertDialog,
+	AlertDialogAction,
+	AlertDialogCancel,
+	AlertDialogContent,
+	AlertDialogDescription,
+	AlertDialogFooter,
+	AlertDialogHeader,
+	AlertDialogTitle,
+	AlertDialogTrigger,
+} from "@/components/ui/alertDialog";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import {
+	DropdownMenu,
+	DropdownMenuContent,
+	DropdownMenuItem,
+	DropdownMenuSeparator,
+	DropdownMenuTrigger,
+} from "@/components/ui/dropdownMenu";
 import { DottedSeparator } from "@/components/ui/separator";
 import { Sheet, SheetContent, SheetHeader, SheetTitle } from "@/components/ui/sheet";
-import { ProviderIconType, RenderProviderIcon } from "@/lib/constants/icons";
-import { RequestTypeColors, RequestTypeLabels, Status, StatusColors } from "@/lib/constants/logs";
+import { ProviderIconType, RenderProviderIcon, RoutingEngineUsedIcons } from "@/lib/constants/icons";
+import { RequestTypeColors, RequestTypeLabels, RoutingEngineUsedColors, RoutingEngineUsedLabels, Status, StatusColors } from "@/lib/constants/logs";
 import { LogEntry } from "@/lib/types/logs";
-import { DollarSign, FileText, Timer, Trash2 } from "lucide-react";
+import { Clipboard, DollarSign, FileText, MoreVertical, Timer, Trash2 } from "lucide-react";
 import moment from "moment";
+import { toast } from "sonner";
 import { CodeEditor } from "./codeEditor";
+import ImageView from "./imageView";
 import LogChatMessageView from "./logChatMessageView";
 import LogEntryDetailsView from "./logEntryDetailsView";
 import LogResponsesMessageView from "./logResponsesMessageView";
@@ -23,20 +43,163 @@ interface LogDetailSheetProps {
 	handleDelete: (log: LogEntry) => void;
 }
 
+// Helper to detect container operations (for hiding irrelevant fields like Model/Tokens)
+const isContainerOperation = (object: string) => {
+	const containerTypes = [
+		"container_create",
+		"container_list",
+		"container_retrieve",
+		"container_delete",
+		"container_file_create",
+		"container_file_list",
+		"container_file_retrieve",
+		"container_file_content",
+		"container_file_delete",
+	];
+	return containerTypes.includes(object?.toLowerCase());
+};
+
 export function LogDetailSheet({ log, open, onOpenChange, handleDelete }: LogDetailSheetProps) {
 	if (!log) return null;
+
+	const isContainer = isContainerOperation(log.object);
 
 	// Taking out tool call
 	let toolsParameter = null;
 	if (log.params?.tools) {
 		try {
 			toolsParameter = JSON.stringify(log.params.tools, null, 2);
-		} catch (ignored) {}
+		} catch (ignored) { }
 	}
+
+	const copyRequestBody = async () => {
+		try {
+			// Check if request is for responses, chat, speech, text completion, or embedding (exclude transcriptions)
+			const object = log.object?.toLowerCase() || "";
+			const isChat = object === "chat_completion" || object === "chat_completion_stream";
+			const isResponses = object === "responses" || object === "responses_stream";
+			const isSpeech = object === "speech" || object === "speech_stream";
+			const isTextCompletion = object === "text_completion" || object === "text_completion_stream";
+			const isEmbedding = object === "embedding";
+			const isTranscription = object === "transcription" || object === "transcription_stream";
+
+			// Skip if transcription
+			if (isTranscription) {
+				toast.error("Copy request body is not available for transcription requests");
+				return;
+			}
+
+			// Skip if not a supported request type
+			if (!isChat && !isResponses && !isSpeech && !isTextCompletion && !isEmbedding) {
+				toast.error("Copy request body is only available for chat, responses, speech, text completion, and embedding requests");
+				return;
+			}
+
+			// Helper function to extract text content from ChatMessage
+			const extractTextFromMessage = (message: any): string => {
+				if (!message || !message.content) {
+					return "";
+				}
+				if (typeof message.content === "string") {
+					return message.content;
+				}
+				if (Array.isArray(message.content)) {
+					return message.content
+						.filter((block: any) => block && block.type === "text" && block.text)
+						.map((block: any) => block.text || "")
+						.join("");
+				}
+				return "";
+			};
+
+			// Helper function to extract texts from ChatMessage content blocks (for embeddings)
+			const extractTextsFromMessage = (message: any): string[] => {
+				if (!message || !message.content) {
+					return [];
+				}
+				if (typeof message.content === "string") {
+					return message.content ? [message.content] : [];
+				}
+				if (Array.isArray(message.content)) {
+					return message.content.filter((block: any) => block && block.type === "text" && block.text).map((block: any) => block.text);
+				}
+				return [];
+			};
+
+			// Build request body following OpenAI schema
+			const requestBody: any = {
+				model: log.provider && log.model ? `${log.provider}/${log.model}` : log.model || "",
+			};
+
+			// Add messages/input/prompt based on request type
+			if (isChat && log.input_history && log.input_history.length > 0) {
+				requestBody.messages = log.input_history;
+			} else if (isResponses && log.responses_input_history && log.responses_input_history.length > 0) {
+				requestBody.input = log.responses_input_history;
+			} else if (isSpeech && log.speech_input) {
+				requestBody.input = log.speech_input.input;
+			} else if (isTextCompletion && log.input_history && log.input_history.length > 0) {
+				// For text completions, extract prompt from input_history
+				const firstMessage = log.input_history[0];
+				const prompt = extractTextFromMessage(firstMessage);
+				if (prompt) {
+					requestBody.prompt = prompt;
+				}
+			} else if (isEmbedding && log.input_history && log.input_history.length > 0) {
+				// For embeddings, extract all texts from input_history
+				const texts: string[] = [];
+				for (const message of log.input_history) {
+					const messageTexts = extractTextsFromMessage(message);
+					texts.push(...messageTexts);
+				}
+				if (texts.length > 0) {
+					// Use single string if only one text, otherwise use array
+					requestBody.input = texts.length === 1 ? texts[0] : texts;
+				}
+			}
+
+			// Add params (excluding tools and instructions as they're handled separately in OpenAI schema)
+			if (log.params) {
+				const paramsCopy = { ...log.params };
+				// Remove tools and instructions from params as they're typically top-level in OpenAI schema
+				// Keep all other params (temperature, max_tokens, voice, etc.)
+				delete paramsCopy.tools;
+				delete paramsCopy.instructions;
+
+				// Merge remaining params into request body
+				Object.assign(requestBody, paramsCopy);
+			}
+
+			// Add tools if they exist (for chat and responses) - OpenAI schema has tools at top level
+			if ((isChat || isResponses) && log.params?.tools && Array.isArray(log.params.tools) && log.params.tools.length > 0) {
+				requestBody.tools = log.params.tools;
+			}
+
+			// Add instructions if they exist (for responses) - OpenAI schema has instructions at top level
+			if (isResponses && log.params?.instructions) {
+				requestBody.instructions = log.params.instructions;
+			}
+
+			const requestBodyJson = JSON.stringify(requestBody, null, 2);
+			navigator.clipboard
+				.writeText(requestBodyJson)
+				.then(() => {
+					toast.success("Request body copied to clipboard");
+				})
+				.catch((error) => {
+					toast.error("Failed to copy request body");
+				});
+		} catch (error) {
+			toast.error("Failed to copy request body");
+		}
+	};
+	// Extract audio format from request params
+	// Format can be in params.audio?.format or params.extra_params?.audio?.format
+	const audioFormat = (log.params as any)?.audio?.format || (log.params as any)?.extra_params?.audio?.format || undefined;
 
 	return (
 		<Sheet open={open} onOpenChange={onOpenChange}>
-			<SheetContent className="dark:bg-card flex w-full flex-col gap-4 overflow-x-hidden bg-white p-8">
+			<SheetContent className="dark:bg-card flex w-full flex-col gap-4 overflow-x-hidden bg-white p-8 sm:max-w-[60%]">
 				<SheetHeader className="flex flex-row items-center px-0">
 					<div className="flex w-full items-center justify-between">
 						<SheetTitle className="flex w-fit items-center gap-2 font-medium">
@@ -46,18 +209,47 @@ export function LogDetailSheet({ log, open, onOpenChange, handleDelete }: LogDet
 							</Badge>
 						</SheetTitle>
 					</div>
-					<Button
-						variant="outline"
-						className="ml-auto"
-						onClick={() => {
-							handleDelete(log);
-							onOpenChange(false);
-						}}
-					>
-						<Trash2 />
-					</Button>
+					<AlertDialog>
+						<DropdownMenu>
+							<DropdownMenuTrigger asChild>
+								<Button variant="ghost" size="icon">
+									<MoreVertical className="h-3 w-3" />
+								</Button>
+							</DropdownMenuTrigger>
+							<DropdownMenuContent align="end">
+								<DropdownMenuItem onClick={copyRequestBody}>
+									<Clipboard className="h-4 w-4" />
+									Copy request body
+								</DropdownMenuItem>
+								<DropdownMenuSeparator />
+								<AlertDialogTrigger asChild>
+									<DropdownMenuItem variant="destructive">
+										<Trash2 className="h-4 w-4" />
+										Delete log
+									</DropdownMenuItem>
+								</AlertDialogTrigger>
+							</DropdownMenuContent>
+						</DropdownMenu>
+						<AlertDialogContent>
+							<AlertDialogHeader>
+								<AlertDialogTitle>Are you sure you want to delete this log?</AlertDialogTitle>
+								<AlertDialogDescription>This action cannot be undone. This will permanently delete the log entry.</AlertDialogDescription>
+							</AlertDialogHeader>
+							<AlertDialogFooter>
+								<AlertDialogCancel>Cancel</AlertDialogCancel>
+								<AlertDialogAction
+									onClick={() => {
+										handleDelete(log);
+										onOpenChange(false);
+									}}
+								>
+									Delete
+								</AlertDialogAction>
+							</AlertDialogFooter>
+						</AlertDialogContent>
+					</AlertDialog>
 				</SheetHeader>
-				<div className="space-y-4 rounded-sm border px-6 py-4">
+				<div className="-mt-4 space-y-4 rounded-sm border px-6 py-4">
 					<div className="space-y-4">
 						<BlockHeader title="Timings" icon={<Timer className="h-5 w-5 text-gray-600" />} />
 						<div className="grid w-full grid-cols-3 items-center justify-between gap-4">
@@ -94,15 +286,14 @@ export function LogDetailSheet({ log, open, onOpenChange, handleDelete }: LogDet
 									</Badge>
 								}
 							/>
-							<LogEntryDetailsView className="w-full" label="Model" value={log.model} />
+							{!isContainer && <LogEntryDetailsView className="w-full" label="Model" value={log.model} />}
 							<LogEntryDetailsView
 								className="w-full"
 								label="Type"
 								value={
 									<div
-										className={`${
-											RequestTypeColors[log.object as keyof typeof RequestTypeColors] ?? "bg-gray-100 text-gray-800"
-										} rounded-sm px-3 py-1`}
+										className={`${RequestTypeColors[log.object as keyof typeof RequestTypeColors] ?? "bg-gray-100 text-gray-800"
+											} rounded-sm px-3 py-1`}
 									>
 										{RequestTypeLabels[log.object as keyof typeof RequestTypeLabels] ?? log.object ?? "unknown"}
 									</div>
@@ -114,23 +305,46 @@ export function LogDetailSheet({ log, open, onOpenChange, handleDelete }: LogDet
 							)}
 							{log.fallback_index > 0 && <LogEntryDetailsView className="w-full" label="Fallback Index" value={log.fallback_index} />}
 							{log.virtual_key && <LogEntryDetailsView className="w-full" label="Virtual Key" value={log.virtual_key.name} />}
+							{log.routing_engine_used && (
+								<LogEntryDetailsView className="w-full" label="Routing Engine Used" value={
+									<Badge className={RoutingEngineUsedColors[log.routing_engine_used as keyof typeof RoutingEngineUsedColors] ?? "bg-gray-100 text-gray-800"}>
+										<div className="flex items-center gap-2">
+											{RoutingEngineUsedIcons[log.routing_engine_used as keyof typeof RoutingEngineUsedIcons]?.()}
+											<span>{RoutingEngineUsedLabels[log.routing_engine_used as keyof typeof RoutingEngineUsedLabels] ?? log.routing_engine_used}</span>
+										</div>
+									</Badge>
+								} />
+							)}
+							{log.routing_rule && <LogEntryDetailsView className="w-full" label="Routing Rule" value={log.routing_rule.name} />}
+
+							{/* Display audio params if present */}
+							{(log.params as any)?.audio && (
+								<>
+									{(log.params as any).audio.format && (
+										<LogEntryDetailsView className="w-full" label="Audio Format" value={(log.params as any).audio.format} />
+									)}
+									{(log.params as any).audio.voice && (
+										<LogEntryDetailsView className="w-full" label="Audio Voice" value={(log.params as any).audio.voice} />
+									)}
+								</>
+							)}
 
 							{log.params &&
 								Object.keys(log.params).length > 0 &&
 								Object.entries(log.params)
-									.filter(([key]) => key !== "tools" && key !== "instructions")
+									.filter(([key]) => key !== "tools" && key !== "instructions" && key !== "audio")
 									.filter(([_, value]) => typeof value === "boolean" || typeof value === "number" || typeof value === "string")
 									.map(([key, value]) => <LogEntryDetailsView key={key} className="w-full" label={key} value={value} />)}
 						</div>
 					</div>
-					{log.status === "success" && (
+					{log.status === "success" && !isContainer && (
 						<>
 							<DottedSeparator />
 							<div className="space-y-4">
 								<BlockHeader title="Tokens" icon={<DollarSign className="h-5 w-5 text-gray-600" />} />
 								<div className="grid w-full grid-cols-3 items-center justify-between gap-4">
-									<LogEntryDetailsView className="w-full" label="Prompt Tokens" value={log.token_usage?.prompt_tokens || "-"} />
-									<LogEntryDetailsView className="w-full" label="Completion Tokens" value={log.token_usage?.completion_tokens || "-"} />
+									<LogEntryDetailsView className="w-full" label="Input Tokens" value={log.token_usage?.prompt_tokens || "-"} />
+									<LogEntryDetailsView className="w-full" label="Output Tokens" value={log.token_usage?.completion_tokens || "-"} />
 									<LogEntryDetailsView className="w-full" label="Total Tokens" value={log.token_usage?.total_tokens || "-"} />
 									{log.token_usage?.prompt_tokens_details && (
 										<>
@@ -184,6 +398,57 @@ export function LogDetailSheet({ log, open, onOpenChange, handleDelete }: LogDet
 									)}
 								</div>
 							</div>
+							{(() => {
+								const params = log.params as any;
+								const reasoning = params?.reasoning;
+								if (!reasoning || typeof reasoning !== "object" || Object.keys(reasoning).length === 0) {
+									return null;
+								}
+								return (
+									<>
+										<DottedSeparator />
+										<div className="space-y-4">
+											<BlockHeader title="Reasoning Parameters" icon={<FileText className="h-5 w-5 text-gray-600" />} />
+											<div className="grid w-full grid-cols-3 items-center justify-between gap-4">
+												{reasoning.effort && (
+													<LogEntryDetailsView
+														className="w-full"
+														label="Effort"
+														value={
+															<Badge variant="secondary" className="uppercase">
+																{reasoning.effort}
+															</Badge>
+														}
+													/>
+												)}
+												{reasoning.summary && (
+													<LogEntryDetailsView
+														className="w-full"
+														label="Summary"
+														value={
+															<Badge variant="secondary" className="uppercase">
+																{reasoning.summary}
+															</Badge>
+														}
+													/>
+												)}
+												{reasoning.generate_summary && (
+													<LogEntryDetailsView
+														className="w-full"
+														label="Generate Summary"
+														value={
+															<Badge variant="secondary" className="uppercase">
+																{reasoning.generate_summary}
+															</Badge>
+														}
+													/>
+												)}
+												{reasoning.max_tokens && <LogEntryDetailsView className="w-full" label="Max Tokens" value={reasoning.max_tokens} />}
+											</div>
+										</div>
+									</>
+								);
+							})()}
 							{log.cache_debug && (
 								<>
 									<DottedSeparator />
@@ -271,7 +536,7 @@ export function LogDetailSheet({ log, open, onOpenChange, handleDelete }: LogDet
 				</div>
 				{toolsParameter && (
 					<div className="w-full rounded-sm border">
-						<div className="border-b px-6 py-2 text-sm font-medium">Tools</div>
+						<div className="border-b px-6 py-2 text-sm font-medium">Tools ({log.params?.tools?.length || 0})</div>
 						<CodeEditor
 							className="z-0 w-full"
 							shouldAdjustInitialHeight={true}
@@ -297,14 +562,15 @@ export function LogDetailSheet({ log, open, onOpenChange, handleDelete }: LogDet
 				)}
 
 				{(log.transcription_input || log.transcription_output) && (
-					<>
-						<div className="mt-4 w-full text-center text-sm font-medium">Transcription</div>
-						<TranscriptionView
-							transcriptionInput={log.transcription_input}
-							transcriptionOutput={log.transcription_output}
-							isStreaming={log.stream}
-						/>
-					</>
+					<TranscriptionView
+						transcriptionInput={log.transcription_input}
+						transcriptionOutput={log.transcription_output}
+						isStreaming={log.stream}
+					/>
+				)}
+
+				{(log.image_generation_input || log.image_generation_output) && (
+					<ImageView imageInput={log.image_generation_input} imageOutput={log.image_generation_output} requestType={log.object} />
 				)}
 
 				{/* Show conversation history for chat/text completions */}
@@ -312,7 +578,7 @@ export function LogDetailSheet({ log, open, onOpenChange, handleDelete }: LogDet
 					<>
 						<div className="mt-4 w-full text-left text-sm font-medium">Conversation History</div>
 						{log.input_history.slice(0, -1).map((message, index) => (
-							<LogChatMessageView key={index} message={message} />
+							<LogChatMessageView key={index} message={message} audioFormat={audioFormat} />
 						))}
 					</>
 				)}
@@ -321,7 +587,7 @@ export function LogDetailSheet({ log, open, onOpenChange, handleDelete }: LogDet
 				{log.input_history && log.input_history.length > 0 && (
 					<>
 						<div className="mt-4 w-full text-left text-sm font-medium">Input</div>
-						<LogChatMessageView message={log.input_history[log.input_history.length - 1]} />
+						<LogChatMessageView message={log.input_history[log.input_history.length - 1]} audioFormat={audioFormat} />
 					</>
 				)}
 
@@ -340,7 +606,7 @@ export function LogDetailSheet({ log, open, onOpenChange, handleDelete }: LogDet
 								<div className="mt-4 flex w-full items-center gap-2">
 									<div className="text-sm font-medium">Response</div>
 								</div>
-								<LogChatMessageView message={log.output_message} />
+								<LogChatMessageView message={log.output_message} audioFormat={audioFormat} />
 							</>
 						)}
 						{log.responses_output && log.responses_output.length > 0 && !log.error_details?.error.message && (
@@ -362,6 +628,31 @@ export function LogDetailSheet({ log, open, onOpenChange, handleDelete }: LogDet
 										),
 									}}
 								/>
+							</>
+						)}
+						{log.raw_request && (
+							<>
+								<div className="mt-4 w-full text-left text-sm font-medium">
+									Raw Request sent to <span className="font-medium capitalize">{log.provider}</span>
+								</div>
+								<div className="w-full rounded-sm border">
+									<CodeEditor
+										className="z-0 w-full"
+										shouldAdjustInitialHeight={true}
+										maxHeight={250}
+										wrap={true}
+										code={(() => {
+											try {
+												return JSON.stringify(JSON.parse(log.raw_request), null, 2);
+											} catch {
+												return log.raw_request; // Fallback to raw string if parsing fails
+											}
+										})()}
+										lang="json"
+										readonly={true}
+										options={{ scrollBeyondLastLine: false, collapsibleBlocks: true, lineNumbers: "off", alwaysConsumeMouseWheel: false }}
+									/>
+								</div>
 							</>
 						)}
 						{log.raw_response && (
@@ -394,7 +685,7 @@ export function LogDetailSheet({ log, open, onOpenChange, handleDelete }: LogDet
 								<div className="mt-4 w-full text-left text-sm font-medium">Error</div>
 								<div className="w-full rounded-sm border">
 									<div className="border-b px-6 py-2 text-sm font-medium">Error</div>
-									<div className="px-6 py-2 font-mono text-xs">{log.error_details.error.message}</div>
+									<div className="px-6 py-2 font-mono text-xs break-words">{log.error_details.error.message}</div>
 								</div>
 							</>
 						)}

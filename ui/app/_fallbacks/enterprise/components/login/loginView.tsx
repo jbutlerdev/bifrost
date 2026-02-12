@@ -115,7 +115,7 @@ export default function LoginView() {
 				<div className="border-border bg-card w-full space-y-6 rounded-lg border p-8 shadow-sm">
 					{/* Logo */}
 					<div className="flex items-center justify-center">
-						<Image src={logoSrc} alt="Bifrost" width={200} height={26} priority className="" />
+						<Image src={logoSrc} alt="Bifrost" width={160} height={26} priority className="" />
 					</div>
 
 					<div className="space-y-2 text-center">
@@ -158,7 +158,7 @@ export default function LoginView() {
 							/>
 						</div>
 
-						<Button type="submit" className="w-full text-sm" isLoading={isLoading} disabled={isLoading}>
+						<Button type="submit" className="h-9 w-full text-sm" isLoading={isLoading} disabled={isLoading}>
 							{isLoading || isLoggingIn ? "Signing in..." : "Sign in"}
 						</Button>
 					</form>

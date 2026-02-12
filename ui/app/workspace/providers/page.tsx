@@ -31,6 +31,7 @@ export default function Providers() {
 	const selectedProvider = useAppSelector((state) => state.provider.selectedProvider);
 	const providerFormIsDirty = useAppSelector((state) => state.provider.isDirty);
 	const hasProviderCreateAccess = useRbac(RbacResource.ModelProvider, RbacOperation.Create);
+	const hasProviderDeleteAccess = useRbac(RbacResource.ModelProvider, RbacOperation.Delete);
 
 	const [showRedirectionDialog, setShowRedirectionDialog] = useState(false);
 	const [showDeleteProviderDialog, setShowDeleteProviderDialog] = useState(false);
@@ -58,7 +59,9 @@ export default function Providers() {
 		// We also try to fetch the latest version
 		getProvider(provider)
 			.unwrap()
-			.then(() => {})
+			.then((providerInfo) => {
+				dispatch(setSelectedProvider(providerInfo));
+			})
 			.catch((err) => {
 				if (err.status === 404) {
 					// Initializing provider config with default values
@@ -70,6 +73,7 @@ export default function Providers() {
 							network_config: DefaultNetworkConfig,
 							custom_provider_config: undefined,
 							proxy_config: undefined,
+							send_back_raw_request: undefined,
 							send_back_raw_response: undefined,
 							status: "error",
 						}),
@@ -125,17 +129,18 @@ export default function Providers() {
 					setShowCustomProviderDialog(false);
 				}}
 			/>
-			<div className="flex flex-col">
+			<div className="flex flex-col" style={{ maxHeight: "calc(100vh - 70px)", width: "300px" }}>
 				<TooltipProvider>
-					<div className="flex w-[250px] flex-col gap-2 pb-10">
+					<div className="custom-scrollbar flex-1 overflow-y-auto">
 						<div className="rounded-md bg-zinc-50/50 p-4 dark:bg-zinc-800/20">
 							{/* Standard Providers */}
-							<div className="mb-4">
+							<div>
 								<div className="text-muted-foreground mb-2 text-xs font-medium">Standard Providers</div>
 								{allProviders.map((p) => {
 									return (
 										<Tooltip key={p.name}>
 											<TooltipTrigger
+												data-testid={`provider-${p.name}`}
 												className={cn(
 													"mb-1 flex w-full items-center gap-2 rounded-sm border px-3 py-1.5 text-sm",
 													selectedProvider?.name === p.name
@@ -163,10 +168,11 @@ export default function Providers() {
 										</Tooltip>
 									);
 								})}
-								{customProviders.length > 0 && <div className="text-muted-foreground mb-2 text-xs font-medium">Custom Providers</div>}
+								{customProviders.length > 0 && <div className="text-muted-foreground mt-3 mb-2 text-xs font-medium">Custom Providers</div>}
 								{customProviders.map((p) => (
 									<Tooltip key={p.name}>
 										<TooltipTrigger
+											data-testid={`provider-${p.name}`}
 											className={cn(
 												"mb-1 flex w-full items-center gap-2 rounded-sm border px-3 py-1.5 text-sm",
 												selectedProvider?.name === p.name
@@ -195,7 +201,7 @@ export default function Providers() {
 													<div className="text-sm">{p.name}</div>
 													<ProviderStatusBadge status={p.status} />
 												</div>
-												{selectedProvider?.name === p.name && (
+												{selectedProvider?.name === p.name && hasProviderDeleteAccess && (
 													<Trash
 														className="text-muted-foreground hover:text-destructive ml-auto hidden h-4 w-4 cursor-pointer group-hover:block"
 														onClick={(event) => {
@@ -210,23 +216,24 @@ export default function Providers() {
 									</Tooltip>
 								))}
 							</div>
-							<div className="my-4">
-								<Button
-									variant="outline"
-									size="sm"
-									className="w-full justify-start"
-									disabled={!hasProviderCreateAccess}
-									onClick={(e) => {
-										e.preventDefault();
-										e.stopPropagation();
-										setShowCustomProviderDialog(true);
-									}}									
-								>
-									<PlusIcon className="h-4 w-4" />
-									<div className="text-xs">Add New Provider</div>
-								</Button>
-							</div>
 						</div>
+					</div>
+					<div className="sticky bottom-0 z-10 bg-zinc-50/80 p-2 backdrop-blur-sm dark:bg-zinc-900/80">
+						<Button
+							variant="outline"
+							size="sm"
+							data-testid="add-provider-btn"
+							className="w-full justify-start"
+							disabled={!hasProviderCreateAccess}
+							onClick={(e) => {
+								e.preventDefault();
+								e.stopPropagation();
+								setShowCustomProviderDialog(true);
+							}}
+						>
+							<PlusIcon className="h-4 w-4" />
+							<div className="text-xs">Add New Custom Provider</div>
+						</Button>
 					</div>
 				</TooltipProvider>
 			</div>

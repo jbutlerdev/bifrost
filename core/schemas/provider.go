@@ -2,7 +2,6 @@
 package schemas
 
 import (
-	"context"
 	"encoding/json"
 	"maps"
 	"time"
@@ -26,8 +25,12 @@ const (
 	ErrProviderRequestMarshal       = "failed to marshal request body to JSON"
 	ErrProviderCreateRequest        = "failed to create HTTP request to provider API"
 	ErrProviderDoRequest            = "failed to execute HTTP request to provider API"
+	ErrProviderNetworkError         = "network error occurred while connecting to provider API (DNS lookup, connection refused, etc.)"
 	ErrProviderResponseDecode       = "failed to decode response body from provider API"
 	ErrProviderResponseUnmarshal    = "failed to unmarshal response from provider API"
+	ErrProviderResponseEmpty        = "empty response received from provider"
+	ErrProviderResponseHTML         = "HTML response received from provider"
+	ErrProviderRawRequestUnmarshal  = "failed to unmarshal raw request from provider API"
 	ErrProviderRawResponseUnmarshal = "failed to unmarshal raw response from provider API"
 	ErrProviderResponseDecompress   = "failed to decompress provider's response"
 )
@@ -152,28 +155,71 @@ const (
 
 // ProxyConfig holds the configuration for proxy settings.
 type ProxyConfig struct {
-	Type     ProxyType `json:"type"`     // Type of proxy to use
-	URL      string    `json:"url"`      // URL of the proxy server
-	Username string    `json:"username"` // Username for proxy authentication
-	Password string    `json:"password"` // Password for proxy authentication
+	Type      ProxyType `json:"type"`        // Type of proxy to use
+	URL       string    `json:"url"`         // URL of the proxy server
+	Username  string    `json:"username"`    // Username for proxy authentication
+	Password  string    `json:"password"`    // Password for proxy authentication
+	CACertPEM string    `json:"ca_cert_pem"` // PEM-encoded CA certificate to trust for TLS connections through the proxy
+}
+
+// Redacted returns a redacted copy of the proxy configuration.
+func (pc *ProxyConfig) Redacted() *ProxyConfig {
+	// Create redacted config with same structure but redacted values
+	redactedConfig := ProxyConfig{
+		Type:     pc.Type,
+		URL:      pc.URL,
+		Username: pc.Username,
+	}
+	if pc.Password != "" {
+		redactedConfig.Password = "********"
+	}
+	if pc.CACertPEM != "" {
+		redactedConfig.CACertPEM = "********"
+	}
+	return &redactedConfig
 }
 
 // AllowedRequests controls which operations are permitted.
 // A nil *AllowedRequests means "all operations allowed."
 // A non-nil value only allows fields set to true; omitted or false fields are disallowed.
 type AllowedRequests struct {
-	ListModels           bool `json:"list_models"`
-	TextCompletion       bool `json:"text_completion"`
-	TextCompletionStream bool `json:"text_completion_stream"`
-	ChatCompletion       bool `json:"chat_completion"`
-	ChatCompletionStream bool `json:"chat_completion_stream"`
-	Responses            bool `json:"responses"`
-	ResponsesStream      bool `json:"responses_stream"`
-	Embedding            bool `json:"embedding"`
-	Speech               bool `json:"speech"`
-	SpeechStream         bool `json:"speech_stream"`
-	Transcription        bool `json:"transcription"`
-	TranscriptionStream  bool `json:"transcription_stream"`
+	ListModels            bool `json:"list_models"`
+	TextCompletion        bool `json:"text_completion"`
+	TextCompletionStream  bool `json:"text_completion_stream"`
+	ChatCompletion        bool `json:"chat_completion"`
+	ChatCompletionStream  bool `json:"chat_completion_stream"`
+	Responses             bool `json:"responses"`
+	ResponsesStream       bool `json:"responses_stream"`
+	CountTokens           bool `json:"count_tokens"`
+	Embedding             bool `json:"embedding"`
+	Speech                bool `json:"speech"`
+	SpeechStream          bool `json:"speech_stream"`
+	Transcription         bool `json:"transcription"`
+	TranscriptionStream   bool `json:"transcription_stream"`
+	ImageGeneration       bool `json:"image_generation"`
+	ImageGenerationStream bool `json:"image_generation_stream"`
+	ImageEdit             bool `json:"image_edit"`
+	ImageEditStream       bool `json:"image_edit_stream"`
+	ImageVariation        bool `json:"image_variation"`
+	BatchCreate           bool `json:"batch_create"`
+	BatchList             bool `json:"batch_list"`
+	BatchRetrieve         bool `json:"batch_retrieve"`
+	BatchCancel           bool `json:"batch_cancel"`
+	BatchResults          bool `json:"batch_results"`
+	FileUpload            bool `json:"file_upload"`
+	FileList              bool `json:"file_list"`
+	FileRetrieve          bool `json:"file_retrieve"`
+	FileDelete            bool `json:"file_delete"`
+	FileContent           bool `json:"file_content"`
+	ContainerCreate       bool `json:"container_create"`
+	ContainerList         bool `json:"container_list"`
+	ContainerRetrieve     bool `json:"container_retrieve"`
+	ContainerDelete       bool `json:"container_delete"`
+	ContainerFileCreate   bool `json:"container_file_create"`
+	ContainerFileList     bool `json:"container_file_list"`
+	ContainerFileRetrieve bool `json:"container_file_retrieve"`
+	ContainerFileContent  bool `json:"container_file_content"`
+	ContainerFileDelete   bool `json:"container_file_delete"`
 }
 
 // IsOperationAllowed checks if a specific operation is allowed
@@ -197,6 +243,8 @@ func (ar *AllowedRequests) IsOperationAllowed(operation RequestType) bool {
 		return ar.Responses
 	case ResponsesStreamRequest:
 		return ar.ResponsesStream
+	case CountTokensRequest:
+		return ar.CountTokens
 	case EmbeddingRequest:
 		return ar.Embedding
 	case SpeechRequest:
@@ -207,6 +255,54 @@ func (ar *AllowedRequests) IsOperationAllowed(operation RequestType) bool {
 		return ar.Transcription
 	case TranscriptionStreamRequest:
 		return ar.TranscriptionStream
+	case ImageGenerationRequest:
+		return ar.ImageGeneration
+	case ImageGenerationStreamRequest:
+		return ar.ImageGenerationStream
+	case ImageEditRequest:
+		return ar.ImageEdit
+	case ImageEditStreamRequest:
+		return ar.ImageEditStream
+	case ImageVariationRequest:
+		return ar.ImageVariation
+	case BatchCreateRequest:
+		return ar.BatchCreate
+	case BatchListRequest:
+		return ar.BatchList
+	case BatchRetrieveRequest:
+		return ar.BatchRetrieve
+	case BatchCancelRequest:
+		return ar.BatchCancel
+	case BatchResultsRequest:
+		return ar.BatchResults
+	case FileUploadRequest:
+		return ar.FileUpload
+	case FileListRequest:
+		return ar.FileList
+	case FileRetrieveRequest:
+		return ar.FileRetrieve
+	case FileDeleteRequest:
+		return ar.FileDelete
+	case FileContentRequest:
+		return ar.FileContent
+	case ContainerCreateRequest:
+		return ar.ContainerCreate
+	case ContainerListRequest:
+		return ar.ContainerList
+	case ContainerRetrieveRequest:
+		return ar.ContainerRetrieve
+	case ContainerDeleteRequest:
+		return ar.ContainerDelete
+	case ContainerFileCreateRequest:
+		return ar.ContainerFileCreate
+	case ContainerFileListRequest:
+		return ar.ContainerFileList
+	case ContainerFileRetrieveRequest:
+		return ar.ContainerFileRetrieve
+	case ContainerFileContentRequest:
+		return ar.ContainerFileContent
+	case ContainerFileDeleteRequest:
+		return ar.ContainerFileDelete
 	default:
 		return false // Default to not allowed for unknown operations
 	}
@@ -237,6 +333,7 @@ type ProviderConfig struct {
 	// Logger instance, can be provided by the user or bifrost default logger is used if not provided
 	Logger               Logger                `json:"-"`
 	ProxyConfig          *ProxyConfig          `json:"proxy_config,omitempty"` // Proxy configuration
+	SendBackRawRequest   bool                  `json:"send_back_raw_request"`  // Send raw request back in the bifrost response (default: false)
 	SendBackRawResponse  bool                  `json:"send_back_raw_response"` // Send raw response back in the bifrost response (default: false)
 	CustomProviderConfig *CustomProviderConfig `json:"custom_provider_config,omitempty"`
 }
@@ -274,34 +371,87 @@ func (config *ProviderConfig) CheckAndSetDefaults() {
 	}
 }
 
-type PostHookRunner func(ctx *context.Context, result *BifrostResponse, err *BifrostError) (*BifrostResponse, *BifrostError)
+type PostHookRunner func(ctx *BifrostContext, result *BifrostResponse, err *BifrostError) (*BifrostResponse, *BifrostError)
 
 // Provider defines the interface for AI model providers.
 type Provider interface {
 	// GetProviderKey returns the provider's identifier
 	GetProviderKey() ModelProvider
 	// ListModels performs a list models request
-	ListModels(ctx context.Context, keys []Key, request *BifrostListModelsRequest) (*BifrostListModelsResponse, *BifrostError)
+	ListModels(ctx *BifrostContext, keys []Key, request *BifrostListModelsRequest) (*BifrostListModelsResponse, *BifrostError)
 	// TextCompletion performs a text completion request
-	TextCompletion(ctx context.Context, key Key, request *BifrostTextCompletionRequest) (*BifrostTextCompletionResponse, *BifrostError)
+	TextCompletion(ctx *BifrostContext, key Key, request *BifrostTextCompletionRequest) (*BifrostTextCompletionResponse, *BifrostError)
 	// TextCompletionStream performs a text completion stream request
-	TextCompletionStream(ctx context.Context, postHookRunner PostHookRunner, key Key, request *BifrostTextCompletionRequest) (chan *BifrostStream, *BifrostError)
+	TextCompletionStream(ctx *BifrostContext, postHookRunner PostHookRunner, key Key, request *BifrostTextCompletionRequest) (chan *BifrostStreamChunk, *BifrostError)
 	// ChatCompletion performs a chat completion request
-	ChatCompletion(ctx context.Context, key Key, request *BifrostChatRequest) (*BifrostChatResponse, *BifrostError)
+	ChatCompletion(ctx *BifrostContext, key Key, request *BifrostChatRequest) (*BifrostChatResponse, *BifrostError)
 	// ChatCompletionStream performs a chat completion stream request
-	ChatCompletionStream(ctx context.Context, postHookRunner PostHookRunner, key Key, request *BifrostChatRequest) (chan *BifrostStream, *BifrostError)
+	ChatCompletionStream(ctx *BifrostContext, postHookRunner PostHookRunner, key Key, request *BifrostChatRequest) (chan *BifrostStreamChunk, *BifrostError)
 	// Responses performs a completion request using the Responses API (uses chat completion request internally for non-openai providers)
-	Responses(ctx context.Context, key Key, request *BifrostResponsesRequest) (*BifrostResponsesResponse, *BifrostError)
+	Responses(ctx *BifrostContext, key Key, request *BifrostResponsesRequest) (*BifrostResponsesResponse, *BifrostError)
 	// ResponsesStream performs a completion request using the Responses API stream (uses chat completion stream request internally for non-openai providers)
-	ResponsesStream(ctx context.Context, postHookRunner PostHookRunner, key Key, request *BifrostResponsesRequest) (chan *BifrostStream, *BifrostError)
+	ResponsesStream(ctx *BifrostContext, postHookRunner PostHookRunner, key Key, request *BifrostResponsesRequest) (chan *BifrostStreamChunk, *BifrostError)
+	// CountTokens performs a count tokens request
+	CountTokens(ctx *BifrostContext, key Key, request *BifrostResponsesRequest) (*BifrostCountTokensResponse, *BifrostError)
 	// Embedding performs an embedding request
-	Embedding(ctx context.Context, key Key, request *BifrostEmbeddingRequest) (*BifrostEmbeddingResponse, *BifrostError)
+	Embedding(ctx *BifrostContext, key Key, request *BifrostEmbeddingRequest) (*BifrostEmbeddingResponse, *BifrostError)
 	// Speech performs a text to speech request
-	Speech(ctx context.Context, key Key, request *BifrostSpeechRequest) (*BifrostSpeechResponse, *BifrostError)
+	Speech(ctx *BifrostContext, key Key, request *BifrostSpeechRequest) (*BifrostSpeechResponse, *BifrostError)
 	// SpeechStream performs a text to speech stream request
-	SpeechStream(ctx context.Context, postHookRunner PostHookRunner, key Key, request *BifrostSpeechRequest) (chan *BifrostStream, *BifrostError)
+	SpeechStream(ctx *BifrostContext, postHookRunner PostHookRunner, key Key, request *BifrostSpeechRequest) (chan *BifrostStreamChunk, *BifrostError)
 	// Transcription performs a transcription request
-	Transcription(ctx context.Context, key Key, request *BifrostTranscriptionRequest) (*BifrostTranscriptionResponse, *BifrostError)
+	Transcription(ctx *BifrostContext, key Key, request *BifrostTranscriptionRequest) (*BifrostTranscriptionResponse, *BifrostError)
 	// TranscriptionStream performs a transcription stream request
-	TranscriptionStream(ctx context.Context, postHookRunner PostHookRunner, key Key, request *BifrostTranscriptionRequest) (chan *BifrostStream, *BifrostError)
+	TranscriptionStream(ctx *BifrostContext, postHookRunner PostHookRunner, key Key, request *BifrostTranscriptionRequest) (chan *BifrostStreamChunk, *BifrostError)
+	// ImageGeneration performs an image generation request
+	ImageGeneration(ctx *BifrostContext, key Key, request *BifrostImageGenerationRequest) (
+		*BifrostImageGenerationResponse, *BifrostError)
+	// ImageGenerationStream performs an image generation stream request
+	ImageGenerationStream(ctx *BifrostContext, postHookRunner PostHookRunner, key Key,
+		request *BifrostImageGenerationRequest) (chan *BifrostStreamChunk, *BifrostError)
+	// ImageEdit performs an image edit request
+	ImageEdit(ctx *BifrostContext, key Key, request *BifrostImageEditRequest) (*BifrostImageGenerationResponse, *BifrostError)
+	// ImageEditStream performs an image edit stream request
+	ImageEditStream(ctx *BifrostContext, postHookRunner PostHookRunner, key Key,
+		request *BifrostImageEditRequest) (chan *BifrostStreamChunk, *BifrostError)
+	// ImageVariation performs an image variation request
+	ImageVariation(ctx *BifrostContext, key Key, request *BifrostImageVariationRequest) (*BifrostImageGenerationResponse, *BifrostError)
+	// BatchCreate creates a new batch job for asynchronous processing
+	BatchCreate(ctx *BifrostContext, key Key, request *BifrostBatchCreateRequest) (*BifrostBatchCreateResponse, *BifrostError)
+	// BatchList lists batch jobs
+	BatchList(ctx *BifrostContext, keys []Key, request *BifrostBatchListRequest) (*BifrostBatchListResponse, *BifrostError)
+	// BatchRetrieve retrieves a specific batch job
+	BatchRetrieve(ctx *BifrostContext, keys []Key, request *BifrostBatchRetrieveRequest) (*BifrostBatchRetrieveResponse, *BifrostError)
+	// BatchCancel cancels a batch job
+	BatchCancel(ctx *BifrostContext, keys []Key, request *BifrostBatchCancelRequest) (*BifrostBatchCancelResponse, *BifrostError)
+	// BatchResults retrieves results from a completed batch job
+	BatchResults(ctx *BifrostContext, keys []Key, request *BifrostBatchResultsRequest) (*BifrostBatchResultsResponse, *BifrostError)
+	// FileUpload uploads a file to the provider
+	FileUpload(ctx *BifrostContext, key Key, request *BifrostFileUploadRequest) (*BifrostFileUploadResponse, *BifrostError)
+	// FileList lists files from the provider
+	FileList(ctx *BifrostContext, keys []Key, request *BifrostFileListRequest) (*BifrostFileListResponse, *BifrostError)
+	// FileRetrieve retrieves file metadata from the provider
+	FileRetrieve(ctx *BifrostContext, keys []Key, request *BifrostFileRetrieveRequest) (*BifrostFileRetrieveResponse, *BifrostError)
+	// FileDelete deletes a file from the provider
+	FileDelete(ctx *BifrostContext, keys []Key, request *BifrostFileDeleteRequest) (*BifrostFileDeleteResponse, *BifrostError)
+	// FileContent downloads file content from the provider
+	FileContent(ctx *BifrostContext, keys []Key, request *BifrostFileContentRequest) (*BifrostFileContentResponse, *BifrostError)
+	// ContainerCreate creates a new container
+	ContainerCreate(ctx *BifrostContext, key Key, request *BifrostContainerCreateRequest) (*BifrostContainerCreateResponse, *BifrostError)
+	// ContainerList lists containers
+	ContainerList(ctx *BifrostContext, keys []Key, request *BifrostContainerListRequest) (*BifrostContainerListResponse, *BifrostError)
+	// ContainerRetrieve retrieves a specific container
+	ContainerRetrieve(ctx *BifrostContext, keys []Key, request *BifrostContainerRetrieveRequest) (*BifrostContainerRetrieveResponse, *BifrostError)
+	// ContainerDelete deletes a container
+	ContainerDelete(ctx *BifrostContext, keys []Key, request *BifrostContainerDeleteRequest) (*BifrostContainerDeleteResponse, *BifrostError)
+	// ContainerFileCreate creates a file in a container
+	ContainerFileCreate(ctx *BifrostContext, key Key, request *BifrostContainerFileCreateRequest) (*BifrostContainerFileCreateResponse, *BifrostError)
+	// ContainerFileList lists files in a container
+	ContainerFileList(ctx *BifrostContext, keys []Key, request *BifrostContainerFileListRequest) (*BifrostContainerFileListResponse, *BifrostError)
+	// ContainerFileRetrieve retrieves a file from a container
+	ContainerFileRetrieve(ctx *BifrostContext, keys []Key, request *BifrostContainerFileRetrieveRequest) (*BifrostContainerFileRetrieveResponse, *BifrostError)
+	// ContainerFileContent retrieves the content of a file from a container
+	ContainerFileContent(ctx *BifrostContext, keys []Key, request *BifrostContainerFileContentRequest) (*BifrostContainerFileContentResponse, *BifrostError)
+	// ContainerFileDelete deletes a file from a container
+	ContainerFileDelete(ctx *BifrostContext, keys []Key, request *BifrostContainerFileDeleteRequest) (*BifrostContainerFileDeleteResponse, *BifrostError)
 }

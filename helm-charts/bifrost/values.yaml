@@ -6,10 +6,16 @@
 replicaCount: 1
 
 image:
+  # Container image repository
+  # Default: Docker Hub public image
+  # For enterprise customers with private registry, use full URL:
+  #   repository: us-west1-docker.pkg.dev/bifrost-enterprise/your-org/bifrost
+  #   repository: your-registry.example.com/your-org/bifrost
+  #   repository: 123456789.dkr.ecr.us-east-1.amazonaws.com/bifrost
   repository: docker.io/maximhq/bifrost
   pullPolicy: IfNotPresent
-  # REQUIRED: Specify the image tag (e.g., v1.3.5, v1.3.36, latest)
-  # Docker images are tagged with v prefix (e.g., v1.3.5)
+  # REQUIRED: Specify the image tag (e.g., v1.5.0, latest)
+  # Docker images are tagged with v prefix (e.g., v1.5.0)
   # See available tags at: https://hub.docker.com/r/maximhq/bifrost/tags
   tag: ""
 
@@ -27,6 +33,17 @@ serviceAccount:
   # The name of the service account to use.
   # If not set and create is true, a name is generated using the fullname template
   name: ""
+
+# Annotations to add to the deployment metadata
+# Useful for tools like Keel (keel.sh) for automatic image updates
+# Example:
+#   deploymentAnnotations:
+#     keel.sh/policy: force
+#     keel.sh/trigger: poll
+deploymentAnnotations: {}
+
+# Labels to add to the deployment metadata (in addition to default labels)
+deploymentLabels: {}
 
 podAnnotations: {}
 podLabels: {}
@@ -52,7 +69,7 @@ service:
 ingress:
   enabled: false
   className: ""
-  annotations: {}    
+  annotations: {}
   hosts:
     - host: bifrost.local
       paths:
@@ -108,17 +125,29 @@ affinity: {}
 # Bifrost specific configuration
 # You can find entire schema at https://getbifrost.ai/schema
 bifrost:
-  # Application settings    
+  # Application settings
   appDir: /app/data
   port: 8080
   host: 0.0.0.0
   logLevel: info
   logStyle: json
-  
+
   # Encryption key for sensitive data
   # Can be set as a secret or environment variable
   encryptionKey: ""
-  
+
+  # Authentication configuration (top-level)
+  # This controls authentication for Bifrost API and dashboard
+  authConfig:
+    adminUsername: ""
+    adminPassword: ""
+    isEnabled: false
+    disableAuthOnInference: false
+    # Use existing Kubernetes secret for admin credentials
+    existingSecret: ""
+    usernameKey: "username"
+    passwordKey: "password"
+
   # Client configuration
   client:
     dropExcessRequests: false
@@ -126,13 +155,28 @@ bifrost:
     allowedOrigins:
       - "*"
     enableLogging: true
-    enableGovernance: false
+    disableContentLogging: false
+    disableDbPingsInHealth: false
+    logRetentionDays: 365
+    enableGovernance: true
     enforceGovernanceHeader: false
-    allowDirectKeys: true
+    allowDirectKeys: false
     maxRequestBodySizeMb: 100
     enableLitellmFallbacks: false
     prometheusLabels: []
-  
+    # Header filtering configuration for x-bf-eh-* headers forwarded to LLM providers
+    headerFilterConfig:
+      allowlist: []
+      denylist: []
+
+  # Framework configuration
+  framework:
+    pricing:
+      # Custom pricing URL for model cost data
+      pricingUrl: ""
+      # Sync interval in seconds (default: 86400 = 24 hours, minimum: 3600)
+      pricingSyncInterval: 86400
+
   # Provider configurations (add your provider keys here)
   # You can specify API keys directly or use env.VAR_NAME syntax to reference environment variables
   # When using existingSecret in providerSecrets, the keys will be injected as env vars and
@@ -148,7 +192,7 @@ bifrost:
     #   keys:
     #     - value: "sk-ant-..."
     #       weight: 1
-  
+
   # Provider secrets - use existing Kubernetes secrets for provider API keys
   # These will be injected as environment variables that can be referenced in providers config
   providerSecrets: {}
@@ -160,7 +204,7 @@ bifrost:
     #   existingSecret: "my-anthropic-secret"
     #   key: "api-key"
     #   envVar: "ANTHROPIC_API_KEY"
-  
+
   # MCP (Model Context Protocol) configuration
   mcp:
     enabled: false
@@ -171,22 +215,26 @@ bifrost:
       #     command: "/path/to/mcp/server"
       #     args: []
       #     envs: []
-  
+    # Tool manager configuration
+    toolManagerConfig:
+      toolExecutionTimeout: 30
+      maxAgentDepth: 10
+
   # Plugins configuration
   plugins:
     telemetry:
       enabled: false
       config: {}
-    
+
     logging:
       enabled: false
       config: {}
-    
+
     governance:
       enabled: false
       config:
         is_vk_mandatory: false
-    
+
     maxim:
       enabled: false
       config:
@@ -196,7 +244,7 @@ bifrost:
       secretRef:
         name: ""
         key: "api-key"
-    
+
     semanticCache:
       enabled: false
       config:
@@ -210,7 +258,7 @@ bifrost:
         cache_by_model: true
         cache_by_provider: true
         exclude_system_prompt: false
-    
+
     otel:
       enabled: false
       config:
@@ -219,37 +267,187 @@ bifrost:
         trace_type: "otel"
         protocol: "grpc"
 
+    datadog:
+      enabled: false
+      config:
+        service_name: "bifrost"
+        agent_addr: "localhost:8126"
+        env: ""
+        version: ""
+        custom_tags: {}
+        enable_traces: true
+
+    # Custom/dynamic plugins
+    custom: []
+      # - name: "my-custom-plugin"
+      #   enabled: true
+      #   path: "/plugins/my-plugin.so"
+      #   version: 1
+      #   config:
+      #     key: value
+
+  # Governance configuration for budgets, rate limits, customers, teams, and virtual keys
+  governance:
+    budgets: []
+      # - id: "budget-1"
+      #   max_limit: 100
+      #   reset_duration: "1M"
+    rateLimits: []
+      # - id: "rate-limit-1"
+      #   token_max_limit: 100000
+      #   token_reset_duration: "1d"
+      #   request_max_limit: 1000
+      #   request_reset_duration: "1h"
+    customers: []
+      # - id: "customer-1"
+      #   name: "Customer Name"
+      #   budget_id: "budget-1"
+    teams: []
+      # - id: "team-1"
+      #   name: "Team Name"
+      #   customer_id: "customer-1"
+      #   budget_id: "budget-1"
+    virtualKeys: []
+      # - id: "vk-1"
+      #   name: "Virtual Key 1"
+      #   description: "Virtual key description"
+      #   value: "vk-..."
+      #   is_active: true
+      #   team_id: "team-1"
+      #   budget_id: "budget-1"
+      #   rate_limit_id: "rate-limit-1"
+    authConfig:
+      adminUsername: ""
+      adminPassword: ""
+      isEnabled: false
+      disableAuthOnInference: false
+      # Use existing Kubernetes secret for admin credentials
+      existingSecret: ""
+      usernameKey: "username"
+      passwordKey: "password"
+
+  # Cluster mode configuration for distributed deployments
+  cluster:
+    enabled: false
+    peers: []
+      # - "bifrost-0.bifrost-headless:7946"
+      # - "bifrost-1.bifrost-headless:7946"
+    gossip:
+      port: 7946
+      config:
+        timeoutSeconds: 10
+        successThreshold: 3
+        failureThreshold: 3
+    discovery:
+      enabled: false
+      # Discovery type: kubernetes, dns, udp, consul, etcd, mdns
+      type: ""
+      allowedAddressSpace: []
+      # Kubernetes discovery
+      k8sNamespace: ""
+      k8sLabelSelector: ""
+      # DNS discovery
+      dnsNames: []
+      # UDP broadcast discovery
+      udpBroadcastPort: 0
+      # Consul discovery
+      consulAddress: ""
+      # Etcd discovery
+      etcdEndpoints: []
+      # mDNS discovery
+      mdnsService: ""
+
+  # SAML/SCIM configuration for enterprise SSO
+  saml:
+    enabled: false
+    # Provider: okta, entra
+    provider: ""
+    config: {}
+      # Okta configuration:
+      # issuerUrl: "https://your-domain.okta.com/oauth2/default"
+      # clientId: ""
+      # clientSecret: ""
+      # audience: ""
+      # userIdField: "sub"
+      # teamIdsField: "groups"
+      # rolesField: "roles"
+      #
+      # Entra (Azure AD) configuration:
+      # tenantId: ""
+      # clientId: ""
+      # clientSecret: ""
+      # audience: ""
+      # appIdUri: ""
+      # userIdField: "oid"
+      # teamIdsField: "groups"
+      # rolesField: "roles"
+
+  # Load balancer configuration for intelligent request routing
+  loadBalancer:
+    enabled: false
+    trackerConfig: {}
+    bootstrap: {}
+
+  # Guardrails configuration for content moderation and policy enforcement
+  guardrails:
+    rules: []
+      # - id: 1
+      #   name: "Block PII"
+      #   description: "Block requests containing PII"
+      #   enabled: true
+      #   cel_expression: "!contains(request.body, 'SSN')"
+      #   apply_to: "input"
+      #   sampling_rate: 100
+      #   timeout: 1000
+    providers: []
+      # - id: 1
+      #   provider_name: "bedrock"
+      #   policy_name: "content-filter"
+      #   enabled: true
+      #   config: {}
+
+  # Audit logs configuration for CADF-compliant activity logging
+  auditLogs:
+    disabled: false
+    hmacKey: ""
+
 # Storage configuration
 storage:
-  # Storage mode: sqlite or postgres
-  # This determines what config_store and logs_store use
+  # Default storage mode: sqlite or postgres
+  # Used as fallback when per-store type is not specified
   mode: sqlite  # Options: sqlite, postgres
-  
-  # Persistent volume for SQLite databases (when mode is sqlite)
+
+  # Persistent volume for SQLite databases (when using sqlite for any store)
   persistence:
     enabled: true
     # storageClass: "-"  # Use default storage class
     accessMode: ReadWriteOnce
     size: 10Gi
     # existingClaim: ""  # Use an existing PVC
-  
+
   # Configuration store settings
   configStore:
     enabled: true
-    # type is derived from storage.mode, but can be overridden
-    # type: sqlite  # Options: sqlite, postgres
-  
+    # Backend type for config store. Empty string uses storage.mode as default
+    type: ""  # Options: sqlite, postgres, or "" (uses storage.mode)
+    # PostgreSQL connection pool tuning (only applies when type is postgres)
+    # maxIdleConns: 5
+    # maxOpenConns: 50
+
   # Logs store settings
   logsStore:
     enabled: true
-    # type is derived from storage.mode, but can be overridden
-    # type: sqlite  # Options: sqlite, postgres
+    # Backend type for logs store. Empty string uses storage.mode as default
+    type: ""  # Options: sqlite, postgres, or "" (uses storage.mode)
+    # PostgreSQL connection pool tuning (only applies when type is postgres)
+    # maxIdleConns: 5
+    # maxOpenConns: 50
 
-# PostgreSQL configuration (when storage.mode is postgres)
+# PostgreSQL configuration (when any store uses postgres)
 postgresql:
   # Deploy PostgreSQL as part of this chart
   enabled: false
-  
+
   # Use external PostgreSQL instance
   external:
     enabled: false
@@ -262,24 +460,24 @@ postgresql:
     # Use existing Kubernetes secret for password (takes precedence over password field)
     existingSecret: ""
     passwordKey: "password"
-  
+
   # PostgreSQL image configuration
   image:
     repository: postgres
     tag: "16-alpine"
     pullPolicy: IfNotPresent
-  
+
   # PostgreSQL subchart configuration (when postgresql.enabled is true)
   auth:
     username: bifrost
     password: bifrost_password
     database: bifrost
-  
+
   primary:
     persistence:
       enabled: true
       size: 8Gi
-    
+
     resources:
       limits:
         cpu: 1000m
@@ -287,7 +485,7 @@ postgresql:
       requests:
         cpu: 250m
         memory: 256Mi
-  
+
   metrics:
     enabled: false
 
@@ -296,12 +494,12 @@ vectorStore:
   # Enable vector store for semantic caching
   enabled: false
   type: none  # Options: none, weaviate, redis, qdrant
-  
+
   # Weaviate configuration
   weaviate:
     # Deploy Weaviate as part of this chart
     enabled: false
-    
+
     # Use external Weaviate instance
     external:
       enabled: false
@@ -313,18 +511,18 @@ vectorStore:
       # Use existing Kubernetes secret for API key (takes precedence over apiKey field)
       existingSecret: ""
       apiKeyKey: "api-key"
-    
+
     # Weaviate subchart configuration (when weaviate.enabled is true)
     replicas: 1
-    
+
     image:
       repository: semitechnologies/weaviate
       tag: "1.24.1"
-    
+
     persistence:
       enabled: true
       size: 10Gi
-    
+
     resources:
       limits:
         cpu: 1000m
@@ -332,7 +530,7 @@ vectorStore:
       requests:
         cpu: 500m
         memory: 1Gi
-    
+
     env:
       QUERY_DEFAULTS_LIMIT: "25"
       AUTHENTICATION_ANONYMOUS_ACCESS_ENABLED: "true"
@@ -340,12 +538,12 @@ vectorStore:
       DEFAULT_VECTORIZER_MODULE: "none"
       ENABLE_MODULES: ""
       CLUSTER_HOSTNAME: "node1"
-  
+
   # Redis configuration
   redis:
     # Deploy Redis as part of this chart
     enabled: false
-    
+
     # Use external Redis instance
     external:
       enabled: false
@@ -356,23 +554,23 @@ vectorStore:
       # Use existing Kubernetes secret for password (takes precedence over password field)
       existingSecret: ""
       passwordKey: "password"
-    
+
     # Redis image configuration
     image:
       repository: redis
       tag: "7-alpine"
       pullPolicy: IfNotPresent
-    
+
     # Redis subchart configuration (when redis.enabled is true)
     auth:
       enabled: true
       password: "redis_password"
-    
+
     master:
       persistence:
         enabled: true
         size: 8Gi
-      
+
       resources:
         limits:
           cpu: 500m
@@ -380,7 +578,7 @@ vectorStore:
         requests:
           cpu: 250m
           memory: 256Mi
-    
+
     metrics:
       enabled: false
 
@@ -431,3 +629,7 @@ envFrom: []
   # - configMapRef:
   #     name: my-configmap
 
+
+# Init containers to run before the main application container.
+# Provide a list of init containers using standard Kubernetes container spec.
+initContainers: []

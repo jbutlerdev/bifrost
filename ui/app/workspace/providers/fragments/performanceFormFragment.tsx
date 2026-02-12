@@ -32,6 +32,7 @@ export function PerformanceFormFragment({ provider }: PerformanceFormFragmentPro
 				concurrency: provider.concurrency_and_buffer_size?.concurrency ?? DefaultPerformanceConfig.concurrency,
 				buffer_size: provider.concurrency_and_buffer_size?.buffer_size ?? DefaultPerformanceConfig.buffer_size,
 			},
+			send_back_raw_request: provider.send_back_raw_request ?? false,
 			send_back_raw_response: provider.send_back_raw_response ?? false,
 		},
 	});
@@ -47,10 +48,10 @@ export function PerformanceFormFragment({ provider }: PerformanceFormFragmentPro
 				concurrency: provider.concurrency_and_buffer_size?.concurrency ?? DefaultPerformanceConfig.concurrency,
 				buffer_size: provider.concurrency_and_buffer_size?.buffer_size ?? DefaultPerformanceConfig.buffer_size,
 			},
+			send_back_raw_request: provider.send_back_raw_request ?? false,
 			send_back_raw_response: provider.send_back_raw_response ?? false,
 		});
-		// eslint-disable-next-line react-hooks/exhaustive-deps
-	}, [form, provider.name]);
+	}, [form, provider.name, provider.concurrency_and_buffer_size, provider.send_back_raw_request, provider.send_back_raw_response]);
 
 	const onSubmit = (data: PerformanceFormSchema) => {
 		// Create updated provider configuration
@@ -60,12 +61,14 @@ export function PerformanceFormFragment({ provider }: PerformanceFormFragmentPro
 				concurrency: data.concurrency_and_buffer_size.concurrency,
 				buffer_size: data.concurrency_and_buffer_size.buffer_size,
 			},
+			send_back_raw_request: data.send_back_raw_request,
 			send_back_raw_response: data.send_back_raw_response,
 		};
 		updateProvider(updatedProvider)
 			.unwrap()
 			.then(() => {
 				toast.success("Provider configuration updated successfully");
+				form.reset(data);
 			})
 			.catch((err) => {
 				toast.error("Failed to update provider configuration", {
@@ -92,7 +95,20 @@ export function PerformanceFormFragment({ provider }: PerformanceFormFragmentPro
 												type="number"
 												placeholder="10"
 												{...field}
-												onChange={(e) => field.onChange(Number.parseInt(e.target.value) || 0)}
+												value={field.value === undefined || Number.isNaN(field.value) ? '' : field.value}
+												disabled={!hasUpdateProviderAccess}
+												onChange={(e) => {
+													const value = e.target.value
+													if (value === '') {
+														field.onChange(undefined)
+														return
+													}
+													const parsed = Number.parseInt(value)
+													if (!Number.isNaN(parsed)) {
+														field.onChange(parsed)
+													}
+													form.trigger("concurrency_and_buffer_size");
+												}}
 											/>
 										</FormControl>
 										<FormMessage />
@@ -112,7 +128,20 @@ export function PerformanceFormFragment({ provider }: PerformanceFormFragmentPro
 												type="number"
 												placeholder="10"
 												{...field}
-												onChange={(e) => field.onChange(Number.parseInt(e.target.value) || 0)}
+												value={field.value === undefined || Number.isNaN(field.value) ? '' : field.value}
+												disabled={!hasUpdateProviderAccess}
+												onChange={(e) => {
+													const value = e.target.value
+													if (value === '') {
+														field.onChange(undefined)
+														return
+													}
+													const parsed = Number.parseInt(value)
+													if (!Number.isNaN(parsed)) {
+														field.onChange(parsed)
+													}
+													form.trigger("concurrency_and_buffer_size");
+												}}
 											/>
 										</FormControl>
 										<FormMessage />
@@ -120,6 +149,37 @@ export function PerformanceFormFragment({ provider }: PerformanceFormFragmentPro
 								)}
 							/>
 						</div>
+					</div>
+
+					<div className="mt-6 space-y-4">
+						<FormField
+							control={form.control}
+							name="send_back_raw_request"
+							render={({ field }) => (
+								<FormItem>
+									<div className="flex items-center justify-between space-x-2">
+										<div className="space-y-0.5">
+											<FormLabel>Include Raw Request</FormLabel>
+											<p className="text-muted-foreground text-xs">
+												Include the raw provider request alongside the parsed request for debugging and advanced use cases
+											</p>
+										</div>
+										<FormControl>
+											<Switch
+												size="md"
+												checked={field.value}
+												disabled={!hasUpdateProviderAccess}
+												onCheckedChange={(checked) => {
+													field.onChange(checked);
+													form.trigger("send_back_raw_request");
+												}}
+											/>
+										</FormControl>
+									</div>
+									<FormMessage />
+								</FormItem>
+							)}
+						/>
 					</div>
 
 					<div className="mt-6 space-y-4">
@@ -139,6 +199,7 @@ export function PerformanceFormFragment({ provider }: PerformanceFormFragmentPro
 											<Switch
 												size="md"
 												checked={field.value}
+												disabled={!hasUpdateProviderAccess}
 												onCheckedChange={(checked) => {
 													field.onChange(checked);
 													form.trigger("send_back_raw_response");

@@ -2,7 +2,6 @@ package integrations
 
 import (
 	"bytes"
-	"context"
 	"fmt"
 	"log"
 	"reflect"
@@ -12,6 +11,8 @@ import (
 	"github.com/maximhq/bifrost/core/schemas"
 	"github.com/valyala/fasthttp"
 )
+
+var bifrostContextKeyProvider = schemas.BifrostContextKey("provider")
 
 var availableIntegrations = []string{
 	"openai",
@@ -42,12 +43,12 @@ func newBifrostError(err error, message string) *schemas.BifrostError {
 	}
 }
 
-// safeGetRequestType safely obtains the request type from a BifrostStream chunk.
+// safeGetRequestType safely obtains the request type from a BifrostStreamChunk chunk.
 // It checks multiple sources in order of preference:
 // 1. Response ExtraFields if any response is available
 // 2. BifrostError ExtraFields if error is available and not nil
 // 3. Falls back to "unknown" if no source is available
-func safeGetRequestType(chunk *schemas.BifrostStream) string {
+func safeGetRequestType(chunk *schemas.BifrostStreamChunk) string {
 	if chunk == nil {
 		return "unknown"
 	}
@@ -134,7 +135,7 @@ func extractExactPath(ctx *fasthttp.RequestCtx) string {
 }
 
 // sendStreamError sends an error in streaming format using the stream error converter if available
-func (g *GenericRouter) sendStreamError(ctx *fasthttp.RequestCtx, bifrostCtx *context.Context, config RouteConfig, bifrostErr *schemas.BifrostError) {
+func (g *GenericRouter) sendStreamError(ctx *fasthttp.RequestCtx, bifrostCtx *schemas.BifrostContext, config RouteConfig, bifrostErr *schemas.BifrostError) {
 	var errorResponse interface{}
 
 	// Use stream error converter if available, otherwise fallback to regular error converter
@@ -160,7 +161,7 @@ func (g *GenericRouter) sendStreamError(ctx *fasthttp.RequestCtx, bifrostCtx *co
 
 // sendError sends an error response with the appropriate status code and JSON body.
 // It handles different error types (string, error interface, or arbitrary objects).
-func (g *GenericRouter) sendError(ctx *fasthttp.RequestCtx, bifrostCtx *context.Context, errorConverter ErrorConverter, bifrostErr *schemas.BifrostError) {
+func (g *GenericRouter) sendError(ctx *fasthttp.RequestCtx, bifrostCtx *schemas.BifrostContext, errorConverter ErrorConverter, bifrostErr *schemas.BifrostError) {
 	if bifrostErr.StatusCode != nil {
 		ctx.SetStatusCode(*bifrostErr.StatusCode)
 	} else {
@@ -168,8 +169,12 @@ func (g *GenericRouter) sendError(ctx *fasthttp.RequestCtx, bifrostCtx *context.
 	}
 	ctx.SetContentType("application/json")
 
-	errorBody, err := sonic.Marshal(errorConverter(bifrostCtx, bifrostErr))
+	// Marshal the error for response and log the error for diagnostics
+	responseObj := errorConverter(bifrostCtx, bifrostErr)
+	errorBody, err := sonic.Marshal(responseObj)
 	if err != nil {
+		// Log the marshal failure and return a plain text error
+		g.logger.Error("failed to marshal error response", "err", err, "path", extractExactPath(ctx))
 		ctx.SetStatusCode(fasthttp.StatusInternalServerError)
 		ctx.SetBodyString(fmt.Sprintf("failed to encode error response: %v", err))
 		return
@@ -179,7 +184,7 @@ func (g *GenericRouter) sendError(ctx *fasthttp.RequestCtx, bifrostCtx *context.
 }
 
 // sendSuccess sends a successful response with HTTP 200 status and JSON body.
-func (g *GenericRouter) sendSuccess(ctx *fasthttp.RequestCtx, bifrostCtx *context.Context, errorConverter ErrorConverter, response interface{}) {
+func (g *GenericRouter) sendSuccess(ctx *fasthttp.RequestCtx, bifrostCtx *schemas.BifrostContext, errorConverter ErrorConverter, response interface{}) {
 	ctx.SetStatusCode(fasthttp.StatusOK)
 	ctx.SetContentType("application/json")
 
@@ -255,6 +260,10 @@ func (g *GenericRouter) extractAndParseFallbacks(req interface{}, bifrostReq *sc
 	case schemas.TranscriptionRequest, schemas.TranscriptionStreamRequest:
 		if bifrostReq.TranscriptionRequest != nil {
 			bifrostReq.TranscriptionRequest.Fallbacks = parsedFallbacks
+		}
+	case schemas.ImageGenerationRequest, schemas.ImageGenerationStreamRequest:
+		if bifrostReq.ImageGenerationRequest != nil {
+			bifrostReq.ImageGenerationRequest.Fallbacks = parsedFallbacks
 		}
 	}
 
